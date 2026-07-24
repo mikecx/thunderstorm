@@ -1,0 +1,35 @@
+{
+  "name": "thunderstorm",
+  "version": "0.1.0",
+  "description": "A tiny ActiveRecord-style ORM for TypeScript, built on Knex",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "demo": "ts-node src/example/demo.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate:make": "knex migrate:make --knexfile knexfile.ts",
+    "migrate:latest": "knex migrate:latest --knexfile knexfile.ts",
+    "migrate:rollback": "knex migrate:rollback --knexfile knexfile.ts",
+    "migrate:status": "knex migrate:status --knexfile knexfile.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "knex": "^3.1.0",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^2.1.9"
+  }
+}

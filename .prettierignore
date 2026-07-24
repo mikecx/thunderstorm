@@ -1,0 +1,6 @@
+node_modules
+dist
+coverage
+*.sqlite3
+package-lock.json
+.claude
