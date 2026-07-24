@@ -6,7 +6,7 @@
 
 <img src="assets/icon.png" alt="thunderstorm icon" width="72" align="right">
 
-A small ActiveRecord/ActiveModel-style ORM for TypeScript, built on top of [Knex](https://knexjs.org). Models are plain classes; schema, validations, and lifecycle hooks are declared with decorators.
+A small ActiveRecord/ActiveModel-style ORM for TypeScript, built on top of [Knex](https://knexjs.org). Models are plain classes; schema, validations, and lifecycle hooks are declared with decorators. `Model` (persisted, ActiveRecord-style) is built on `AttributeModel` (validated and dirty-tracked, but not persisted — ActiveModel-style, usable standalone for form objects and DTOs).
 
 ```bash
 npm install
@@ -18,6 +18,7 @@ npm test
 
 - [Connecting](#connecting)
 - [Defining a model](#defining-a-model)
+- [AttributeModel: attributes without persistence](#attributemodel-attributes-without-persistence)
 - [CRUD](#crud)
 - [Convenience methods](#convenience-methods)
 - [Serialization](#serialization)
@@ -83,6 +84,35 @@ class User extends Model {
 - `@Column()` maps a class field to a database column; only columns registered this way are read/written by `save()`.
 - `@PrimaryKey()` is `@Column({ primary: true })`. Defaults to `id` if no column is marked primary.
 - Each subclass owns its own column/validation/callback metadata — subclassing `Model` again for an unrelated table starts from a clean slate.
+
+## AttributeModel: attributes without persistence
+
+`Model` is two layers: **`AttributeModel`** (attributes, validations, dirty tracking, serialization — no notion of a database) and `Model extends AttributeModel`, which adds persistence, querying, associations, and lifecycle callbacks. This mirrors Rails' ActiveModel/ActiveRecord split.
+
+Extend `AttributeModel` directly for something validated and tracked like a record but that never gets saved — a form object, a search/filter object, an API request DTO:
+
+```ts
+import { AttributeModel } from './src/AttributeModel';
+import { Column, Validates } from './src/decorators';
+
+class SearchFilter extends AttributeModel {
+  @Column()
+  @Validates({ presence: true, length: { min: 2 } })
+  query!: string;
+
+  @Column({ default: 'relevance' })
+  sortBy!: string;
+}
+
+const filter = new SearchFilter({ query: 'thunderstorm' });
+filter.isValid(); // true — @Column, @Validates, isValid(), errors, changes/isChanged, toJSON() all work
+```
+
+No `tableName`, no database connection, and none of `Model`'s persistence surface (`save`, `destroy`, `isPersisted`, `dup`, `reload`, `query`, `find`, `where`) exists on it at all — nothing to accidentally call on something that was never going to be saved.
+
+One consequence of having no `save()`: dirty tracking's snapshot never resets, since nothing ever establishes a new "saved" baseline. `isChanged` stays `true` for as long as any attribute differs from how the instance was originally constructed — there's no clean state to return to the way a persisted record has right after `save()`.
+
+Lifecycle callbacks (`@BeforeSave`/`@AfterCreate`/etc.) stay `Model`-only: they're tied to the save/destroy lifecycle by design (there's no `beforeValidation`/`afterValidation` — see [Callbacks](#callbacks)), so a plain `AttributeModel` gets none of them, matching Rails: `ActiveModel::Callbacks` isn't automatic on a plain object either, you'd have to declare your own callback names.
 
 ## CRUD
 
@@ -521,20 +551,21 @@ npm test          # run once
 npm run test:watch
 ```
 
-| File                                                 | Covers                                                                               |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| [src/Model.test.ts](src/Model.test.ts)               | CRUD, querying                                                                       |
-| [src/validations.test.ts](src/validations.test.ts)   | `@Validates`, `errors`, `save`/`saveOrFail`                                          |
-| [src/callbacks.test.ts](src/callbacks.test.ts)       | lifecycle hooks, halting                                                             |
-| [src/associations.test.ts](src/associations.test.ts) | `hasMany`/`hasOne`/`belongsTo`, preload query counts                                 |
-| [src/dirty.test.ts](src/dirty.test.ts)               | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                  |
-| [src/casting.test.ts](src/casting.test.ts)           | built-in casters round-tripping through the DB, custom accessors                     |
-| [src/macros.test.ts](src/macros.test.ts)             | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on |
-| [src/scopes.test.ts](src/scopes.test.ts)             | static-method scopes, `QueryChain.apply()`                                           |
-| [src/transactions.test.ts](src/transactions.test.ts) | commit, rollback, nested reuse                                                       |
-| [src/convenience.test.ts](src/convenience.test.ts)   | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                               |
-| [src/queries.test.ts](src/queries.test.ts)           | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination               |
-| [src/attributes.test.ts](src/attributes.test.ts)     | virtual attributes, defaults, `serializableHash`                                     |
+| File                                                     | Covers                                                                                                     |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                             |
+| [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                |
+| [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                   |
+| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, preload query counts                                                       |
+| [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                        |
+| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors                                           |
+| [src/macros.test.ts](src/macros.test.ts)                 | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on                       |
+| [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                 |
+| [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                             |
+| [src/convenience.test.ts](src/convenience.test.ts)       | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                                                     |
+| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination                                     |
+| [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                           |
+| [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface |
 
 They're the most precise documentation of edge cases — e.g. `associations.test.ts` asserts the exact query count `preloadHasMany` issues via `knex.on('query', ...)`, and `transactions.test.ts` asserts a partially-completed multi-step transfer fully rolls back on failure.
 

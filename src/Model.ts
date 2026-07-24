@@ -1,8 +1,9 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Knex } from 'knex';
-import { CALLBACKS, CallbackType, COLUMNS, ColumnOptions, VALIDATIONS, ValidationRule } from './decorators';
+import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
+import { CALLBACKS, CallbackType } from './decorators';
 import { resolveCaster } from './casters';
-import { Errors, RecordInvalid, RecordNotSaved } from './errors';
+import { RecordInvalid, RecordNotSaved } from './errors';
 
 let knexInstance: Knex | null = null;
 const transactionContext = new AsyncLocalStorage<Knex.Transaction>();
@@ -41,59 +42,16 @@ export async function transaction<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const PERSISTED = Symbol('persisted');
-const SNAPSHOT = Symbol('snapshot');
-const PREVIOUS_CHANGES = Symbol('previousChanges');
-
-export type Changes = Record<string, [any, any]>;
 
 /**
- * The data-attribute shape of a model instance: every declared string-keyed
- * member except methods. Used to type query conditions so `where({...})`
- * gets real autocomplete/typo-checking against a subclass's own declared
- * fields — this can't distinguish an `@Column()` field from an ordinary
- * declared property/getter (decorator metadata isn't visible to the type
- * system), so it's an approximation, not a guarantee every key is a real column.
+ * The ActiveRecord-equivalent layer: extends AttributeModel (attributes,
+ * validations, dirty tracking, serialization — see AttributeModel.ts) with
+ * persistence, querying, associations, and lifecycle callbacks.
  */
-export type AttributesOf<T> = {
-  [K in keyof T as K extends string ? (T[K] extends (...args: any[]) => any ? never : K) : never]: T[K];
-};
-
-/** Centralizes the escape hatch for reading/writing a column by a runtime string key. */
-function getAttr(instance: Model, key: string): any {
-  return (instance as any)[key];
-}
-
-function setAttr(instance: Model, key: string, value: any): void {
-  (instance as any)[key] = value;
-}
-
-export class Model {
+export class Model extends AttributeModel {
   static tableName: string;
 
   private [PERSISTED] = false;
-  private [SNAPSHOT]: Record<string, any> = {};
-  private [PREVIOUS_CHANGES]: Changes = {};
-  readonly errors = new Errors();
-
-  constructor(attrs: Record<string, any> = {}) {
-    Object.assign(this, attrs);
-
-    const ctor = this.constructor as typeof Model;
-    for (const [name, options] of ctor.columns) {
-      if (options.default === undefined || getAttr(this, name) !== undefined) continue;
-      setAttr(this, name, typeof options.default === 'function' ? options.default() : options.default);
-    }
-  }
-
-  // --- schema introspection -------------------------------------------
-
-  static get columns(): Map<string, ColumnOptions> {
-    return (this as any)[COLUMNS] ?? new Map();
-  }
-
-  static get validations(): Map<string, ValidationRule[]> {
-    return (this as any)[VALIDATIONS] ?? new Map();
-  }
 
   static callbacksFor(type: CallbackType): string[] {
     return (this as any)[CALLBACKS]?.get(type) ?? [];
@@ -312,68 +270,6 @@ export class Model {
     }
   }
 
-  // --- validation (ActiveModel-style) -------------------------------------
-
-  /** Override in a subclass for custom/cross-field checks; call this.errors.add(...) on failure. */
-  protected validate(): void {
-    // no-op by default
-  }
-
-  private static isBlank(value: any): boolean {
-    return value === undefined || value === null || value === '';
-  }
-
-  private applyRule(attribute: string, value: any, rule: ValidationRule): void {
-    if (rule.presence && Model.isBlank(value)) {
-      this.errors.add(attribute, rule.message ?? "can't be blank");
-    }
-
-    if (Model.isBlank(value) && (rule.allowBlank || rule.presence)) {
-      // Presence already reported above; skip shape checks on an absent value.
-      return;
-    }
-
-    if (rule.length) {
-      const len = value == null ? 0 : String(value).length;
-      if (rule.length.min !== undefined && len < rule.length.min) {
-        this.errors.add(attribute, rule.message ?? `is too short (minimum is ${rule.length.min} characters)`);
-      }
-      if (rule.length.max !== undefined && len > rule.length.max) {
-        this.errors.add(attribute, rule.message ?? `is too long (maximum is ${rule.length.max} characters)`);
-      }
-    }
-
-    if (rule.format && !rule.format.with.test(String(value))) {
-      this.errors.add(attribute, rule.message ?? 'is invalid');
-    }
-
-    if (rule.inclusion && !rule.inclusion.in.includes(value)) {
-      this.errors.add(attribute, rule.message ?? 'is not included in the list');
-    }
-
-    if (rule.validator) {
-      const message = rule.validator(value, this);
-      if (message) this.errors.add(attribute, message);
-    }
-  }
-
-  private runValidations(): void {
-    this.errors.clear();
-    const ctor = this.constructor as typeof Model;
-    for (const [attribute, rules] of ctor.validations) {
-      for (const rule of rules) {
-        this.applyRule(attribute, getAttr(this, attribute), rule);
-      }
-    }
-    this.validate();
-  }
-
-  /** Runs all validations and returns whether the record is valid, populating `errors` as a side effect. */
-  isValid(): boolean {
-    this.runValidations();
-    return this.errors.isEmpty;
-  }
-
   // --- lifecycle callbacks -------------------------------------------------
 
   /** Runs the registered callbacks for `type` in declaration order. Returns false if a before* callback aborted. */
@@ -408,50 +304,6 @@ export class Model {
       if (value !== undefined) attrs[name] = this.castForWrite(name, value);
     }
     return attrs;
-  }
-
-  // --- dirty tracking (ActiveModel::Dirty-style) --------------------------
-
-  private snapshotAttributes(): void {
-    const ctor = this.constructor as typeof Model;
-    const snapshot: Record<string, any> = {};
-    for (const name of ctor.columns.keys()) {
-      snapshot[name] = getAttr(this, name);
-    }
-    this[SNAPSHOT] = snapshot;
-  }
-
-  private static valuesEqual(a: any, b: any): boolean {
-    if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
-    return Object.is(a, b);
-  }
-
-  /** Column-by-column diff of the in-memory record against its last-loaded/saved state: { attr: [old, new] }. */
-  get changes(): Changes {
-    const ctor = this.constructor as typeof Model;
-    const snapshot = this[SNAPSHOT];
-    const result: Changes = {};
-    for (const name of ctor.columns.keys()) {
-      const oldValue = snapshot[name];
-      const newValue = getAttr(this, name);
-      if (!Model.valuesEqual(oldValue, newValue)) {
-        result[name] = [oldValue, newValue];
-      }
-    }
-    return result;
-  }
-
-  get isChanged(): boolean {
-    return Object.keys(this.changes).length > 0;
-  }
-
-  isAttributeChanged(attribute: string): boolean {
-    return attribute in this.changes;
-  }
-
-  /** What `changes` held immediately before the most recent successful save. Empty before the first save. */
-  get previousChanges(): Changes {
-    return this[PREVIOUS_CHANGES];
   }
 
   /** Discards unsaved in-memory changes by re-fetching the row from the database. */
@@ -503,7 +355,7 @@ export class Model {
       }
     }
 
-    this[PREVIOUS_CHANGES] = pendingChanges;
+    this.setPreviousChanges(pendingChanges);
     this.snapshotAttributes();
 
     await this.runCallbacks(isCreate ? 'afterCreate' : 'afterUpdate');
@@ -560,44 +412,6 @@ export class Model {
     }
     return new (ctor as any)(attrs) as this;
   }
-
-  /**
-   * Plain-object view of this record's declared, non-virtual columns by
-   * default — excludes `errors` and any ad-hoc preloaded properties. Narrow
-   * with `only`/`except`, or pull in extra own properties (e.g. a
-   * `preloadHasMany`/`preloadBelongsTo` result, or a virtual column) with
-   * `include` — a `Model` or `Model[]` found there is serialized recursively.
-   */
-  serializableHash(options: SerializeOptions = {}): Record<string, any> {
-    const ctor = this.constructor as typeof Model;
-    let names = [...ctor.columns.keys()].filter((name) => !ctor.columns.get(name)?.virtual);
-    if (options.only) names = names.filter((name) => options.only!.includes(name));
-    if (options.except) names = names.filter((name) => !options.except!.includes(name));
-
-    const result: Record<string, any> = {};
-    for (const name of names) result[name] = getAttr(this, name);
-
-    for (const key of options.include ?? []) {
-      const value = getAttr(this, key);
-      result[key] = Array.isArray(value)
-        ? value.map((v) => (v instanceof Model ? v.serializableHash() : v))
-        : value instanceof Model
-          ? value.serializableHash()
-          : value;
-    }
-
-    return result;
-  }
-
-  toJSON(): Record<string, any> {
-    return this.serializableHash();
-  }
-}
-
-export interface SerializeOptions {
-  only?: string[];
-  except?: string[];
-  include?: string[];
 }
 
 /**

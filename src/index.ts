@@ -1,5 +1,6 @@
 export { Model, connect, getKnex, transaction, QueryChain } from './Model';
-export type { Changes, AttributesOf, SerializeOptions } from './Model';
+export { AttributeModel } from './AttributeModel';
+export type { Changes, AttributesOf, SerializeOptions } from './AttributeModel';
 export {
   Column,
   PrimaryKey,
