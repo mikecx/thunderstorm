@@ -306,6 +306,41 @@ export class Model extends AttributeModel {
     return attrs;
   }
 
+  /**
+   * Runs any `@Validates({ uniqueness: ... })` rules against the database,
+   * adding errors for conflicts found. Only Model has a table to check
+   * against, so this can't live in AttributeModel's synchronous
+   * runValidations() — see save(), which calls this separately.
+   */
+  private async checkUniqueness(): Promise<void> {
+    const ctor = this.constructor as typeof Model;
+    const pk = ctor.primaryKey;
+
+    for (const [attribute, rules] of ctor.validations) {
+      for (const rule of rules) {
+        if (!rule.uniqueness) continue;
+
+        const value = getAttr(this, attribute);
+        if (value === undefined || value === null || value === '') continue;
+
+        let qb = ctor.query().where(attribute, this.castForWrite(attribute, value));
+        if (typeof rule.uniqueness === 'object' && rule.uniqueness.scope) {
+          const scopes = Array.isArray(rule.uniqueness.scope) ? rule.uniqueness.scope : [rule.uniqueness.scope];
+          for (const scopeAttr of scopes) {
+            qb = qb.where(scopeAttr, this.castForWrite(scopeAttr, getAttr(this, scopeAttr)));
+          }
+        }
+        if (this[PERSISTED]) {
+          qb = qb.whereNot(pk, getAttr(this, pk));
+        }
+
+        if (await qb.first()) {
+          this.errors.add(attribute, rule.message ?? 'has already been taken');
+        }
+      }
+    }
+  }
+
   /** Discards unsaved in-memory changes by re-fetching the row from the database. */
   async reload(): Promise<this> {
     const ctor = this.constructor as typeof Model;
@@ -329,6 +364,8 @@ export class Model extends AttributeModel {
    */
   async save(): Promise<boolean> {
     if (!this.isValid()) return false;
+    await this.checkUniqueness();
+    if (!this.errors.isEmpty) return false;
 
     const ctor = this.constructor as typeof Model;
     const isCreate = !this[PERSISTED];

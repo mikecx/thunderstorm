@@ -70,6 +70,42 @@ export class AttributeModel {
     return (this as any)[VALIDATIONS] ?? new Map();
   }
 
+  // --- mass-assignment protection -----------------------------------------
+
+  /**
+   * Filters a raw untrusted object (e.g. `req.body`) down to a safe payload
+   * for `create()`/`update()`/`new Model(...)`. Only declared `@Column()`
+   * keys ever pass through — anything else in `raw` is silently dropped,
+   * same as an unrecognized param in Rails' strong parameters. The primary
+   * key and any `@Column({ guarded: true })` field are always excluded,
+   * regardless of `allowedKeys`.
+   *
+   * Pass `allowedKeys` for the common case — an explicit per-form/per-endpoint
+   * allowlist, exactly like Rails' `params.permit(:name, :email)` — since a
+   * blocklist alone (`guarded`) only protects fields you remembered to mark;
+   * `guarded` is defense in depth on top of that, not a substitute for it.
+   *
+   * `new Model(attrs)`/`create(attrs)`/`update(attrs)` themselves are NOT
+   * guarded — they're used by trusted internal code too (`dup()`, seed
+   * scripts, admin tooling) that legitimately needs to set anything. Never
+   * pass a raw request body to them directly; always route it through
+   * `permit()` first.
+   */
+  static permit<T extends typeof AttributeModel>(
+    this: T,
+    raw: Record<string, any>,
+    allowedKeys?: Array<keyof AttributesOf<InstanceType<T>> & string>
+  ): Partial<AttributesOf<InstanceType<T>>> {
+    const result: Record<string, any> = {};
+    for (const [key, options] of this.columns) {
+      if (options.primary || options.guarded) continue;
+      if (allowedKeys && !(allowedKeys as string[]).includes(key)) continue;
+      if (!(key in raw)) continue;
+      result[key] = raw[key];
+    }
+    return result as Partial<AttributesOf<InstanceType<T>>>;
+  }
+
   // --- validation (ActiveModel-style) -------------------------------------
 
   /** Override in a subclass for custom/cross-field checks; call this.errors.add(...) on failure. */
@@ -183,16 +219,23 @@ export class AttributeModel {
   // --- serialization -------------------------------------------------------
 
   /**
-   * Plain-object view of this record's declared, non-virtual columns by
-   * default — excludes `errors` and any ad-hoc preloaded properties. Narrow
-   * with `only`/`except`, or pull in extra own properties (e.g. a
-   * `preloadHasMany`/`preloadBelongsTo` result, or a virtual column) with
-   * `include` — an `AttributeModel` or array of them found there is
-   * serialized recursively.
+   * Plain-object view of this record's declared, non-virtual, non-guarded
+   * columns by default — excludes `errors` and any ad-hoc preloaded
+   * properties, and (unlike `permit()`, where `guarded` is about incoming
+   * data) also excludes anything marked `@Column({ guarded: true })` since
+   * that's exactly the "never let this leak" signal (a password digest, for
+   * instance) — `only`/`except` can't resurrect an excluded column, only
+   * narrow the safe default set further. Pull in extra own properties (e.g.
+   * a `preloadHasMany`/`preloadBelongsTo` result, or a virtual/guarded
+   * column you deliberately want) with `include` instead — an
+   * `AttributeModel` or array of them found there is serialized recursively.
    */
   serializableHash(options: SerializeOptions = {}): Record<string, any> {
     const ctor = this.constructor as typeof AttributeModel;
-    let names = [...ctor.columns.keys()].filter((name) => !ctor.columns.get(name)?.virtual);
+    let names = [...ctor.columns.keys()].filter((name) => {
+      const columnOptions = ctor.columns.get(name);
+      return !columnOptions?.virtual && !columnOptions?.guarded;
+    });
     if (options.only) names = names.filter((name) => options.only!.includes(name));
     if (options.except) names = names.filter((name) => !options.except!.includes(name));
 

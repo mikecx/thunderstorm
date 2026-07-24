@@ -1,5 +1,6 @@
 import type { Caster, ColumnType } from './casters';
 import type { Model } from './Model';
+import { generateToken, hashPassword, verifyPassword } from './security';
 
 export interface ColumnOptions {
   primary?: boolean;
@@ -15,6 +16,17 @@ export interface ColumnOptions {
    * the others. Primitives (strings/numbers/booleans) are safe as literals.
    */
   default?: any | (() => any);
+  /**
+   * Two-way protection for a column that should never move through an
+   * untrusted boundary in either direction — an admin flag, a role, a
+   * password digest: excluded from `permit()`'s output regardless of an
+   * allowlist passed to it (so it can never come *from* mass-assigned
+   * input), and excluded from `serializableHash()`/`toJSON()`'s default
+   * output (so it never goes *out* in an API response either). The primary
+   * key is always excluded from `permit()` too, whether or not it's marked
+   * here.
+   */
+  guarded?: boolean;
 }
 
 export const COLUMNS = Symbol('columns');
@@ -44,6 +56,19 @@ export interface ValidationRule {
   allowBlank?: boolean;
   /** Overrides the default message for this rule. */
   message?: string;
+  /**
+   * Checked against the database, not in memory — unlike every other rule
+   * here, this only runs as part of `Model.save()` (see Model.ts), never
+   * from the synchronous `isValid()`, since it needs a query. A `Model`-only
+   * feature: `AttributeModel` has no table to check against, so this key is
+   * silently ignored there. `scope` restricts the uniqueness check to rows
+   * that also match the named column(s) — e.g. unique per account, not
+   * globally. This is a UX nicety, not a hard guarantee: a concurrent
+   * request can still slip a duplicate in between the check and the write
+   * (classic TOCTOU) — pair it with a real unique index/constraint in the
+   * migration for actual correctness under concurrency.
+   */
+  uniqueness?: boolean | { scope?: string | string[] };
 }
 
 export const VALIDATIONS = Symbol('validations');
@@ -193,6 +218,103 @@ export function Timestamped<TBase extends ModelConstructor>(
   ownCallbackList(WithTimestamps, 'beforeUpdate').push('__stampUpdatedAt');
 
   return WithTimestamps;
+}
+
+/**
+ * Mixin adding password authentication, mirroring `has_secure_password`:
+ * hardcoded columns `password` (virtual), `passwordConfirmation` (virtual),
+ * `passwordDigest` (real, `guarded` so it can never come from mass-assigned
+ * input), and an `authenticate(candidate)` method. Hashed with Node's
+ * built-in `scrypt` (see security.ts) — no bcrypt dependency.
+ *
+ * Password handling runs as a single `beforeSave` callback rather than a
+ * `@Validates` rule: it needs to *do* something (hash it), not just check
+ * it, and it needs `this.isPersisted` to tell create from update, which
+ * plain validation rules don't have access to.
+ *
+ * - On create: `password` is required, hashed into `passwordDigest`.
+ * - On update: touching `password` re-hashes it; leaving it `undefined`
+ *   leaves the existing digest alone (you can update other fields without
+ *   supplying a password).
+ * - If `passwordConfirmation` is set, it must match `password`.
+ */
+export function SecurePassword<TBase extends ModelConstructor>(
+  Base: TBase
+): TBase &
+  (new (...args: any[]) => {
+    password?: string;
+    passwordConfirmation?: string;
+    passwordDigest: string;
+    authenticate(candidate: string): Promise<boolean>;
+  }) {
+  class WithSecurePassword extends Base {
+    password?: string;
+    passwordConfirmation?: string;
+    passwordDigest!: string;
+
+    async authenticate(candidate: string): Promise<boolean> {
+      return this.passwordDigest ? verifyPassword(candidate, this.passwordDigest) : false;
+    }
+  }
+
+  const columns = ownColumns(WithSecurePassword);
+  columns.set('passwordDigest', { guarded: true });
+  columns.set('password', { virtual: true });
+  columns.set('passwordConfirmation', { virtual: true });
+
+  (WithSecurePassword.prototype as any).__handlePassword = async function (this: any) {
+    // `password` is virtual, so it never auto-clears after use — without
+    // checking dirty tracking, every subsequent save() of the same instance
+    // would re-hash the same unchanged password with a fresh salt.
+    if (!this.isAttributeChanged('password')) {
+      if (!this.isPersisted) {
+        this.errors.add('password', "can't be blank");
+        return false;
+      }
+      return;
+    }
+
+    if (!this.password) {
+      this.errors.add('password', "can't be blank");
+      return false;
+    }
+    if (this.passwordConfirmation !== undefined && this.password !== this.passwordConfirmation) {
+      this.errors.add('passwordConfirmation', "doesn't match password");
+      return false;
+    }
+    this.passwordDigest = await hashPassword(this.password);
+  };
+
+  ownCallbackList(WithSecurePassword, 'beforeSave').push('__handlePassword');
+
+  return WithSecurePassword;
+}
+
+/**
+ * Mixin adding a `token` column auto-generated on create if unset, plus
+ * `regenerateToken()`, mirroring `has_secure_token`. Handy for API keys,
+ * invite links, "remember me" tokens. `token` is `guarded` so it can never
+ * come from mass-assigned input — it's server-generated, never user-supplied.
+ */
+export function SecureToken<TBase extends ModelConstructor>(
+  Base: TBase
+): TBase & (new (...args: any[]) => { token: string; regenerateToken(): Promise<boolean> }) {
+  class WithSecureToken extends Base {
+    token!: string;
+
+    regenerateToken(): Promise<boolean> {
+      return this.update({ token: generateToken() } as any);
+    }
+  }
+
+  ownColumns(WithSecureToken).set('token', { guarded: true });
+
+  (WithSecureToken.prototype as any).__generateToken = function (this: any) {
+    if (!this.token) this.token = generateToken();
+  };
+  ownCallbackList(WithSecureToken, 'beforeCreate').push('__generateToken');
+
+  return WithSecureToken;
 }
 
 /**

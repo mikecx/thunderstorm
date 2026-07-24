@@ -20,6 +20,7 @@ npm test
 - [Defining a model](#defining-a-model)
 - [AttributeModel: attributes without persistence](#attributemodel-attributes-without-persistence)
 - [CRUD](#crud)
+- [Mass-assignment protection](#mass-assignment-protection)
 - [Convenience methods](#convenience-methods)
 - [Serialization](#serialization)
 - [Querying](#querying)
@@ -35,6 +36,8 @@ npm test
 - [Scopes](#scopes)
 - [Timestamps](#timestamps)
 - [Enums](#enums)
+- [SecurePassword](#securepassword)
+- [SecureToken](#securetoken)
 - [Transactions](#transactions)
 - [Migrations](#migrations)
 - [TypeScript typing notes](#typescript-typing-notes)
@@ -131,6 +134,31 @@ await found!.destroy(); // true, or false if a beforeDestroy callback blocked it
 
 `save()` inserts when the record has no primary key yet, updates otherwise — and only sends the columns that actually changed (see [Dirty tracking](#dirty-tracking)).
 
+## Mass-assignment protection
+
+`new Model(attrs)`, `create(attrs)`, and `update(attrs)` are **not** guarded against untrusted input — they're used by trusted internal code too (`dup()`, seed scripts, admin tooling) that legitimately needs to set anything. Passing a web request body straight to them is exactly the mass-assignment vulnerability that motivated Rails' strong parameters (and its pre-2012 CVEs): `User.create(req.body)` sets _any_ declared column, including ones you never meant to expose, e.g. `role`.
+
+`permit()` is the fix — filter untrusted input down to a safe payload before it reaches `create()`/`update()`:
+
+```ts
+class User extends Model {
+  @Column() name!: string;
+  @Column() email!: string;
+  @Column({ guarded: true }) role!: string; // never comes through permit(), no matter what
+}
+
+// An explicit allowlist, like Rails' params.permit(:name, :email) — the primary
+// mechanism. Prefer this at every web boundary over relying on `guarded` alone.
+await User.create(User.permit(req.body, ['name', 'email']));
+
+// `guarded` columns are excluded even if you name them explicitly:
+User.permit({ name: 'Alice', role: 'admin' }, ['name', 'role']); // => { name: 'Alice' }
+
+// Unknown keys (not a declared @Column() at all) are always dropped too.
+```
+
+`permit()` only ever returns declared `@Column()` keys that are also present in the raw input, always excludes the primary key, and always excludes any `@Column({ guarded: true })` field regardless of the allowlist — think of `allowedKeys` as the primary allowlist mechanism (safe by construction: you opt fields in per form/endpoint) and `guarded` as defense in depth on top of it (a blocklist alone isn't enough — it only protects fields you remembered to mark). `guarded` also excludes a column from `serializableHash()`/`toJSON()`'s default output (see [Serialization](#serialization)) — a password digest shouldn't come _from_ untrusted input or go _out_ in a response.
+
 ## Convenience methods
 
 ```ts
@@ -150,7 +178,7 @@ await copy.save(); // inserts as a new row
 
 ## Serialization
 
-`toJSON()` returns only declared, non-virtual `@Column()` values (see [Virtual attributes and defaults](#virtual-attributes-and-defaults) for what "virtual" means) — not `errors`, not any ad-hoc property a preload attached (e.g. `_posts`), not internal bookkeeping. This is what `JSON.stringify(user)` calls automatically:
+`toJSON()` returns only declared, non-virtual, non-guarded `@Column()` values (see [Virtual attributes and defaults](#virtual-attributes-and-defaults) and [Mass-assignment protection](#mass-assignment-protection) for what "virtual"/"guarded" mean — a password digest, for instance, should never show up in a default API response) — not `errors`, not any ad-hoc property a preload attached (e.g. `_posts`), not internal bookkeeping. This is what `JSON.stringify(user)` calls automatically:
 
 ```ts
 JSON.stringify(user); // '{"id":1,"name":"Alice","email":"alice@example.com"}'
@@ -158,7 +186,7 @@ JSON.stringify(user); // '{"id":1,"name":"Alice","email":"alice@example.com"}'
 
 Without this, `JSON.stringify` walks every own enumerable property, including `errors` and anything `preloadHasMany`/`preloadBelongsTo` attached — which, if both sides of a relation were preloaded (`user._posts[0]._author === user`), is a circular structure that throws.
 
-`toJSON()` is a thin wrapper around `serializableHash()`, which takes `only`/`except`/`include` for finer control — `include` pulls in extra own properties (a virtual column, or a `preloadHasMany`/`preloadBelongsTo` result) and recursively serializes any `Model`/`Model[]` found there:
+`toJSON()` is a thin wrapper around `serializableHash()`, which takes `only`/`except`/`include` for finer control — `only`/`except` can only narrow the safe default set further, never resurrect a virtual/guarded column; `include` is the escape hatch for that, pulling in extra own properties (a virtual/guarded column you deliberately want, or a `preloadHasMany`/`preloadBelongsTo` result) and recursively serializing any `Model`/`Model[]` found there:
 
 ```ts
 user.serializableHash({ except: ['id'] }); // { name: 'Alice', email: '...' }
@@ -208,6 +236,21 @@ role!: string;
 ```
 
 Supported keys: `presence`, `length: { min, max }`, `format: { with: RegExp }`, `inclusion: { in: [...] }`, `validator: (value, instance) => string | null | undefined`, `allowBlank` (skip length/format/inclusion when the value is `null`/`undefined`/`''`), and `message` to override the default text.
+
+`uniqueness` is different from every other key above: it needs a database query, so it's the one `Model`-only validation (`AttributeModel` has no table to check against) and it doesn't run from the synchronous `isValid()` — only `save()`/`saveOrFail()` check it, right after the in-memory validations pass:
+
+```ts
+@Column()
+@Validates({ presence: true })
+@Validates({ uniqueness: true })
+email!: string;
+
+@Column()
+@Validates({ uniqueness: { scope: 'organizationId' }, message: 'is already taken in this organization' })
+handle!: string;
+```
+
+Updating a record to its own current value doesn't flag itself (excluded by primary key). This is a UX nicety, not a hard guarantee — a concurrent request can still slip a duplicate in between the check and the write (classic TOCTOU); pair it with a real unique index/constraint in the migration for actual correctness under concurrency.
 
 For cross-field checks, override the `validate()` hook:
 
@@ -475,6 +518,49 @@ post.isDraft(); // true — one is<Label>() predicate per label
 Post.withStatus('draft'); // QueryChain<Post> — a static scope, throws on an unknown label
 ```
 
+## SecurePassword
+
+`SecurePassword(Base)` is a mixin (same pattern as `Timestamped`) mirroring Rails' `has_secure_password`: hardcoded columns `password` (virtual), `passwordConfirmation` (virtual), `passwordDigest` (real, `guarded`), and an `authenticate()` method. Hashed with Node's built-in `scrypt` — no bcrypt dependency.
+
+```ts
+class User extends SecurePassword(Model) {
+  static tableName = 'users';
+  @PrimaryKey() id!: number;
+  @Column() email!: string;
+}
+
+const user = await User.create({ email: 'alice@example.com', password: 'hunter2' });
+user.passwordDigest; // a salted scrypt hash — never the plaintext
+await user.authenticate('hunter2'); // true
+await user.authenticate('wrong'); // false
+
+await user.update({ email: 'alice@newdomain.com' }); // doesn't touch/re-hash the password
+await user.update({ password: 'newpassword' }); // re-hashes; the old password stops working
+```
+
+- `password` is required on create; leaving it out on a later `update()` leaves the existing digest alone — dirty tracking (`isAttributeChanged('password')`) is what makes "did this save actually touch the password" answerable, since a virtual attribute like `password` never auto-clears after use.
+- If `passwordConfirmation` is set, it must match `password`, or the save fails with a `passwordConfirmation` error.
+- `passwordDigest` is `guarded`: it can never come from `permit()`-filtered input, and it's excluded from `serializableHash()`/`toJSON()`'s default output.
+
+## SecureToken
+
+`SecureToken(Base)` generates a random URL-safe `token` column on create if one wasn't provided, plus `regenerateToken()` — mirroring `has_secure_token`. Useful for API keys, invite links, "remember me" tokens.
+
+```ts
+class ApiKey extends SecureToken(Model) {
+  static tableName = 'api_keys';
+  @PrimaryKey() id!: number;
+  @Column() label!: string;
+}
+
+const key = await ApiKey.create({ label: 'CI' });
+key.token; // a random 24-byte, base64url-encoded string
+
+await key.regenerateToken(); // replaces and persists a new token
+```
+
+`token` is `guarded`, same reasoning as `passwordDigest` — it's server-generated, never something that should arrive via mass-assigned input or leak into a default API response.
+
 ## Transactions
 
 `transaction(fn)` runs `fn` inside a real database transaction. Every `Model` call made anywhere inside it — including in nested async calls — implicitly participates, with **no `trx` parameter to thread through anything**: it's backed by Node's `AsyncLocalStorage`, so `getKnex()` resolves to the active transaction automatically for the lifetime of that async context.
@@ -566,6 +652,9 @@ npm run test:watch
 | [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination                                     |
 | [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                           |
 | [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface |
+| [src/permit.test.ts](src/permit.test.ts)                 | `permit()` — allowlist/guarded/primary-key filtering, the actual mass-assignment vulnerability it closes   |
+| [src/uniqueness.test.ts](src/uniqueness.test.ts)         | `@Validates({ uniqueness })` — self-exclusion on update, scoping, `RecordInvalid` vs `RecordNotSaved`      |
+| [src/security.test.ts](src/security.test.ts)             | `SecurePassword`/`SecureToken` mixins, and the `security.ts` hashing/token primitives directly             |
 
 They're the most precise documentation of edge cases — e.g. `associations.test.ts` asserts the exact query count `preloadHasMany` issues via `knex.on('query', ...)`, and `transactions.test.ts` asserts a partially-completed multi-step transfer fully rolls back on failure.
 

@@ -16,8 +16,11 @@ export {
   Delegate,
   Timestamped,
   Enum,
+  SecurePassword,
+  SecureToken,
 } from './decorators';
 export type { ColumnOptions, ValidationRule, CallbackType } from './decorators';
 export { Errors, RecordInvalid, RecordNotSaved } from './errors';
 export type { Caster, ColumnType } from './casters';
 export { CASTERS, resolveCaster } from './casters';
+export { hashPassword, verifyPassword, generateToken } from './security';
