@@ -133,3 +133,42 @@ describe('findEach / findInBatches', () => {
     expect(seen).toEqual([]);
   });
 });
+
+describe('whereRaw', () => {
+  it('applies a raw SQL condition with bound parameters', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 0 });
+
+    const active = await User.all().whereRaw('active = ?', [1]);
+    expect(active.map((u) => u.name)).toEqual(['Alice']);
+  });
+
+  it('composes with the rest of the chain rather than replacing it', async () => {
+    await User.create({ name: 'Carol', active: 1 });
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 0 });
+
+    const names = await User.where({ active: 1 } as any)
+      .whereRaw('name != ?', ['Carol'])
+      .order('name', 'asc');
+    expect(names.map((u) => u.name)).toEqual(['Alice']);
+  });
+
+  it('expresses an OR condition the object-shaped where() cannot', async () => {
+    await User.create({ name: 'Alice', active: 0 });
+    await User.create({ name: 'Bob', active: 0 });
+    await User.create({ name: 'Carol', active: 0 });
+
+    const matches = await User.all().whereRaw('name = ? OR name = ?', ['Alice', 'Carol']).order('name', 'asc');
+    expect(matches.map((u) => u.name)).toEqual(['Alice', 'Carol']);
+  });
+
+  it('is chainable with pluck()/count()/exists() too, since they all share the same underlying builder', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 0 });
+
+    expect(await User.all().whereRaw('active = ?', [1]).count()).toBe(1);
+    expect(await User.all().whereRaw('active = ?', [1]).exists()).toBe(true);
+    expect(await User.all().whereRaw('active = ?', [0]).pluck('name')).toEqual(['Bob']);
+  });
+});

@@ -40,6 +40,7 @@ npm test
 - [SecureToken](#securetoken)
 - [Transactions](#transactions)
 - [Migrations](#migrations)
+- [Escape hatch: raw SQL](#escape-hatch-raw-sql)
 - [TypeScript typing notes](#typescript-typing-notes)
 - [Testing](#testing)
 - [Development](#development)
@@ -221,6 +222,14 @@ for await (const batch of User.findInBatches({ batchSize: 500 })) {
   await bulkUpdateSomewhereElse(batch);
 }
 ```
+
+When `.where({...})`'s object shape can't express the condition you need — an OR, a raw SQL function — `.whereRaw(sql, bindings)` composes into the same chain instead of making you abandon it:
+
+```ts
+const admins = await User.where({ active: true }).whereRaw('role = ? OR role = ?', ['admin', 'owner']);
+```
+
+See [Escape hatch: raw SQL](#escape-hatch-raw-sql) for what to reach for when even that isn't enough.
 
 ## Validations
 
@@ -609,6 +618,28 @@ export async function down(knex: Knex): Promise<void> {
 
 `npm run demo` doesn't touch the file database at all — it points a fresh in-memory connection at the same `migrations/` directory and calls `knex.migrate.latest()` programmatically, so the demo always runs against the real schema without leaving files behind.
 
+## Escape hatch: raw SQL
+
+Every layer here is designed so you're never actually stuck: `.whereRaw()` (above) handles the common case — an arbitrary condition mid-chain — but when a `Model` or `QueryChain` abstraction genuinely can't express what you need at all, drop to Knex directly. `getKnex()` returns the active connection (or the active transaction, if you're inside one — see [Transactions](#transactions)); `Model.query()` returns the same builder already scoped to that model's table:
+
+```ts
+import { getKnex } from './src/Model';
+
+// Anything Knex can do: joins, subqueries, CTEs, window functions, unions, aggregates...
+const rows = await getKnex()('users').join('posts', 'posts.userId', 'users.id').groupBy('users.id');
+
+// Scoped to a specific model's table:
+const rows2 = await User.query().whereRaw('lower(email) = ?', [email.toLowerCase()]);
+
+// Fully raw SQL — hydrate the rows back into real Model instances with fromRow():
+const raw = await getKnex().raw('SELECT * FROM users WHERE id = ANY(?)', [[1, 2, 3]]);
+const users = (raw.rows ?? raw).map((row: any) => User.fromRow(row));
+```
+
+That last one is the case actually worth calling out: `knex.raw()`'s result shape is **driver-dependent** — sqlite3 resolves directly to an array of rows, Postgres resolves to a full result object with the rows under `.rows` (plus `.rowCount` etc.), MySQL differs again. `raw.rows ?? raw` above is a cheap way to handle both the array and `{ rows }` shapes, but check what your actual driver returns rather than trusting that blindly. Query builder methods (`.select()`, `.where()`, `.whereRaw()`, `Model.query()`, `QueryChain`) don't have this problem — Knex normalizes those across dialects; it's specifically `.raw()`'s return value that isn't normalized.
+
+This is deliberately not hidden or discouraged — Knex is a mature, fully public, actively maintained SQL builder (unlike Arel, which the Rails core team has said isn't a stable public API in modern Rails). There's no ceiling here: if `Model`/`QueryChain` can't do it, Knex almost certainly can, and it's one function call away.
+
 ## TypeScript typing notes
 
 A few deliberate choices shape how usable the types are for consumers:
@@ -649,7 +680,7 @@ npm run test:watch
 | [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                 |
 | [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                             |
 | [src/convenience.test.ts](src/convenience.test.ts)       | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                                                     |
-| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination                                     |
+| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination, `whereRaw` composability           |
 | [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                           |
 | [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface |
 | [src/permit.test.ts](src/permit.test.ts)                 | `permit()` — allowlist/guarded/primary-key filtering, the actual mass-assignment vulnerability it closes   |

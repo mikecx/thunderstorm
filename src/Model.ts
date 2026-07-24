@@ -466,6 +466,17 @@ export class QueryChain<T extends typeof Model> implements PromiseLike<InstanceT
     return this;
   }
 
+  /**
+   * The escape hatch for conditions `.where({...})`'s object-shape can't
+   * express — ORs, raw SQL functions, anything — without abandoning the
+   * chain. Wraps Knex's own `.whereRaw()`; bind values with `?` rather than
+   * interpolating them into the string, same as any other parameterized query.
+   */
+  whereRaw(sql: string, bindings: readonly any[] = []): this {
+    this.qb = this.qb.whereRaw(sql, bindings as any[]);
+    return this;
+  }
+
   order(column: string, direction: 'asc' | 'desc' = 'asc'): this {
     this.qb = this.qb.orderBy(column, direction);
     return this;
