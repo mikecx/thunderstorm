@@ -39,7 +39,7 @@ npx tsc --noEmit && npm run lint && npm run format:check && npm test
 ## Testing conventions
 
 - Vitest, and tests run against **real `sqlite3 :memory:` connections** — no mocking of Knex or the DB layer. Each test file creates its own tables in `beforeEach`.
-- One file per feature area (`validations.test.ts`, `callbacks.test.ts`, `associations.test.ts`, `dirty.test.ts`, `casting.test.ts`, `macros.test.ts`, `scopes.test.ts`, `transactions.test.ts`, `convenience.test.ts`, plus `decorators.test.ts`/`errors.test.ts` for pure-metadata/unit-level checks). Add new tests to the matching file rather than creating a new one per test case.
+- One file per feature area (`validations.test.ts`, `callbacks.test.ts`, `associations.test.ts`, `dirty.test.ts`, `casting.test.ts`, `macros.test.ts`, `scopes.test.ts`, `transactions.test.ts`, `convenience.test.ts`, `queries.test.ts`, `attributes.test.ts`, plus `decorators.test.ts`/`errors.test.ts` for pure-metadata/unit-level checks). Add new tests to the matching file rather than creating a new one per test case.
 - When testing N+1-avoidance or query counts, assert the actual count via `knex.on('query', () => queryCount++)` — don't just assert on the resulting data, which wouldn't catch a regression back to one-query-per-record.
 - `tsconfig.json` excludes `*.test.ts` from the build (`npm run build`) — test files should never end up in `dist/`.
 

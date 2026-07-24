@@ -5,6 +5,16 @@ export interface ColumnOptions {
   primary?: boolean;
   /** Converts between the raw DB value and the JS attribute value on load/save. See src/casters.ts. */
   type?: ColumnType | Caster;
+  /** Tracked, validated, and dirty-tracked like any column, but never sent to the database (excluded from INSERT/UPDATE and default serialization). */
+  virtual?: boolean;
+  /**
+   * Applied in the constructor when the attribute is still undefined. Use a
+   * function for mutable values (objects/arrays) — a bare literal default
+   * would be the same shared reference across every instance that doesn't
+   * set it explicitly, so mutating one instance's default would corrupt all
+   * the others. Primitives (strings/numbers/booleans) are safe as literals.
+   */
+  default?: any | (() => any);
 }
 
 export const COLUMNS = Symbol('columns');

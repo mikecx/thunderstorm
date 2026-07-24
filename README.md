@@ -28,6 +28,7 @@ npm test
 - [Avoiding N+1 queries](#avoiding-n1-queries)
 - [Dirty tracking](#dirty-tracking)
 - [Attribute casting/serialization](#attribute-castingserialization)
+- [Virtual attributes and defaults](#virtual-attributes-and-defaults)
 - [Custom accessors/setters](#custom-accessorssetters)
 - [Delegate](#delegate)
 - [Scopes](#scopes)
@@ -119,7 +120,7 @@ await copy.save(); // inserts as a new row
 
 ## Serialization
 
-`toJSON()` returns only declared `@Column()` values — not `errors`, not any ad-hoc property a preload attached (e.g. `_posts`), not internal bookkeeping. This is what `JSON.stringify(user)` calls automatically:
+`toJSON()` returns only declared, non-virtual `@Column()` values (see [Virtual attributes and defaults](#virtual-attributes-and-defaults) for what "virtual" means) — not `errors`, not any ad-hoc property a preload attached (e.g. `_posts`), not internal bookkeeping. This is what `JSON.stringify(user)` calls automatically:
 
 ```ts
 JSON.stringify(user); // '{"id":1,"name":"Alice","email":"alice@example.com"}'
@@ -127,14 +128,40 @@ JSON.stringify(user); // '{"id":1,"name":"Alice","email":"alice@example.com"}'
 
 Without this, `JSON.stringify` walks every own enumerable property, including `errors` and anything `preloadHasMany`/`preloadBelongsTo` attached — which, if both sides of a relation were preloaded (`user._posts[0]._author === user`), is a circular structure that throws.
 
+`toJSON()` is a thin wrapper around `serializableHash()`, which takes `only`/`except`/`include` for finer control — `include` pulls in extra own properties (a virtual column, or a `preloadHasMany`/`preloadBelongsTo` result) and recursively serializes any `Model`/`Model[]` found there:
+
+```ts
+user.serializableHash({ except: ['id'] }); // { name: 'Alice', email: '...' }
+user.serializableHash({ only: ['name'] }); // { name: 'Alice' }
+
+await User.preloadHasMany([user], Post, { foreignKey: 'userId', as: '_posts' });
+user.serializableHash({ include: ['_posts'] }); // { id, name, email, _posts: [{ id, title, ... }, ...] }
+```
+
 ## Querying
 
-`Model.where()` and `Model.all()` both return a lazy, chainable `QueryChain`. Nothing hits the database until you `await` it or call `.first()`. `all()` is equivalent to `where({})` — every row, but still chainable with `.order()`/`.limit()`, unlike a plain "give me everything" method that just returns an array.
+`Model.where()` and `Model.all()` both return a lazy, chainable `QueryChain`. Nothing hits the database until you `await` it or call a terminal method (`.first()`, `.pluck()`, `.count()`, `.exists()`). `all()` is equivalent to `where({})` — every row, but still chainable with `.order()`/`.limit()`, unlike a plain "give me everything" method that just returns an array.
 
 ```ts
 const bobs = await User.where({ name: 'Bob' });
 const newestFirst = await User.all().order('createdAt', 'desc').limit(10);
 const one = await User.where({ email: 'alice@example.com' }).first();
+
+const names = await User.all().order('name', 'asc').pluck('name'); // string[] — just this column, no model instances
+const activeCount = await User.where({ active: true }).count();
+const hasAdmin = await User.where({ role: 'admin' }).exists();
+```
+
+`.all()`/`.where()` load every matching row into memory at once. For a table that might not fit — a one-off migration script, an export job — use `findEach`/`findInBatches` instead: both page through the table via primary-key cursor (`WHERE id > lastId ORDER BY id LIMIT batchSize`, not `OFFSET`, which gets slower the deeper you page), one query per batch.
+
+```ts
+for await (const user of User.findEach({ batchSize: 500 })) {
+  await sendNewsletter(user);
+}
+
+for await (const batch of User.findInBatches({ batchSize: 500 })) {
+  await bulkUpdateSomewhereElse(batch);
+}
 ```
 
 ## Validations
@@ -157,7 +184,7 @@ For cross-field checks, override the `validate()` hook:
 ```ts
 class SignupForm extends Model {
   @Column() password!: string;
-  @Column() passwordConfirmation!: string;
+  @Column({ virtual: true }) passwordConfirmation!: string; // no such DB column — see below
 
   protected validate(): void {
     if (this.password !== this.passwordConfirmation) {
@@ -299,6 +326,24 @@ For anything the built-ins don't cover, pass a custom caster instead of a type n
 ```ts
 @Column({ type: { load: (raw) => new Decimal(raw), save: (value) => value.toString() } })
 price!: Decimal;
+```
+
+## Virtual attributes and defaults
+
+`@Column({ virtual: true })` declares an attribute that's tracked, validated, and dirty-tracked exactly like any other column, but is never sent to the database — excluded from `INSERT`/`UPDATE` and from the default `toJSON()`/`serializableHash()` output. Use it for fields that only make sense in memory: password confirmation, a search form's filter params, anything with no backing column.
+
+```ts
+class SignupForm extends Model {
+  @Column() password!: string;
+  @Column({ virtual: true }) passwordConfirmation!: string;
+}
+```
+
+`@Column({ default: value })` fills in the attribute in the constructor when it's still `undefined` — it never overrides an explicitly-provided value, and never applies to a record loaded from the database (a loaded row's real value, even `NULL`, always wins). Use a function for mutable defaults (objects/arrays): a bare literal default would be the _same_ shared object across every instance that doesn't set it explicitly, so mutating one instance's default would corrupt every other one.
+
+```ts
+@Column({ default: 'pending' }) status!: string; // primitives are safe as literals
+@Column({ type: 'json', default: () => ({}) }) metadata!: Record<string, any>; // objects need a function
 ```
 
 ## Custom accessors/setters
@@ -487,6 +532,9 @@ npm run test:watch
 | [src/macros.test.ts](src/macros.test.ts)             | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on |
 | [src/scopes.test.ts](src/scopes.test.ts)             | static-method scopes, `QueryChain.apply()`                                           |
 | [src/transactions.test.ts](src/transactions.test.ts) | commit, rollback, nested reuse                                                       |
+| [src/convenience.test.ts](src/convenience.test.ts)   | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                               |
+| [src/queries.test.ts](src/queries.test.ts)           | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination               |
+| [src/attributes.test.ts](src/attributes.test.ts)     | virtual attributes, defaults, `serializableHash`                                     |
 
 They're the most precise documentation of edge cases — e.g. `associations.test.ts` asserts the exact query count `preloadHasMany` issues via `knex.on('query', ...)`, and `transactions.test.ts` asserts a partially-completed multi-step transfer fully rolls back on failure.
 

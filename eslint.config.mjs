@@ -12,7 +12,7 @@ export default tseslint.config(
       // for the metaprogramming internals (getAttr/setAttr, decorator
       // machinery) — see the "TypeScript typing notes" section of the README.
       '@typescript-eslint/no-explicit-any': 'off',
-      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       // @Delegate/@Enum generate members at runtime that the type checker
       // can't see; the documented (README) way to type them is exactly the
       // `interface Foo { ... }` alongside `class Foo` pattern this rule

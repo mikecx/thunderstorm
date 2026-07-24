@@ -77,6 +77,12 @@ export class Model {
 
   constructor(attrs: Record<string, any> = {}) {
     Object.assign(this, attrs);
+
+    const ctor = this.constructor as typeof Model;
+    for (const [name, options] of ctor.columns) {
+      if (options.default === undefined || getAttr(this, name) !== undefined) continue;
+      setAttr(this, name, typeof options.default === 'function' ? options.default() : options.default);
+    }
   }
 
   // --- schema introspection -------------------------------------------
@@ -149,6 +155,45 @@ export class Model {
 
   static where<T extends typeof Model>(this: T, conditions: Partial<AttributesOf<InstanceType<T>>>): QueryChain<T> {
     return new QueryChain(this, this.query().where(conditions as Record<string, any>));
+  }
+
+  /**
+   * Iterates every row in batches (default 1000), one query per batch, using
+   * primary-key cursor pagination — `WHERE pk > lastId ORDER BY pk LIMIT n` —
+   * rather than OFFSET, which gets slower the deeper you page into a large
+   * table. Use this instead of `all()`/`where()` for anything that might not
+   * fit in memory at once.
+   */
+  static async *findInBatches<T extends typeof Model>(
+    this: T,
+    options: { batchSize?: number } = {}
+  ): AsyncGenerator<InstanceType<T>[]> {
+    const batchSize = options.batchSize ?? 1000;
+    const pk = this.primaryKey;
+    let lastId: any = null;
+
+    while (true) {
+      let qb = this.query().orderBy(pk, 'asc').limit(batchSize);
+      if (lastId !== null) qb = qb.where(pk, '>', lastId);
+      const rows = await qb;
+      if (rows.length === 0) return;
+
+      const batch = rows.map((row: any) => this.fromRow(row));
+      yield batch;
+
+      lastId = getAttr(batch[batch.length - 1], pk);
+      if (rows.length < batchSize) return;
+    }
+  }
+
+  /** Same batching as findInBatches(), yielded one record at a time. */
+  static async *findEach<T extends typeof Model>(
+    this: T,
+    options: { batchSize?: number } = {}
+  ): AsyncGenerator<InstanceType<T>> {
+    for await (const batch of this.findInBatches(options)) {
+      yield* batch;
+    }
   }
 
   static async create<T extends typeof Model>(this: T, attrs: Record<string, any>): Promise<InstanceType<T>> {
@@ -357,7 +402,8 @@ export class Model {
   private columnAttributes(): Record<string, any> {
     const ctor = this.constructor as typeof Model;
     const attrs: Record<string, any> = {};
-    for (const name of ctor.columns.keys()) {
+    for (const [name, options] of ctor.columns) {
+      if (options.virtual) continue;
       const value = getAttr(this, name);
       if (value !== undefined) attrs[name] = this.castForWrite(name, value);
     }
@@ -449,7 +495,8 @@ export class Model {
     } else {
       const updateAttrs: Record<string, any> = {};
       for (const [key, [, newValue]] of Object.entries(pendingChanges)) {
-        if (key !== pk) updateAttrs[key] = this.castForWrite(key, newValue);
+        if (key === pk || ctor.columns.get(key)?.virtual) continue;
+        updateAttrs[key] = this.castForWrite(key, newValue);
       }
       if (Object.keys(updateAttrs).length > 0) {
         await ctor.query().where(pk, getAttr(this, pk)).update(updateAttrs);
@@ -514,15 +561,43 @@ export class Model {
     return new (ctor as any)(attrs) as this;
   }
 
-  /** Plain-object view of this record's declared columns only — excludes `errors` and any ad-hoc preloaded properties. */
-  toJSON(): Record<string, any> {
+  /**
+   * Plain-object view of this record's declared, non-virtual columns by
+   * default — excludes `errors` and any ad-hoc preloaded properties. Narrow
+   * with `only`/`except`, or pull in extra own properties (e.g. a
+   * `preloadHasMany`/`preloadBelongsTo` result, or a virtual column) with
+   * `include` — a `Model` or `Model[]` found there is serialized recursively.
+   */
+  serializableHash(options: SerializeOptions = {}): Record<string, any> {
     const ctor = this.constructor as typeof Model;
+    let names = [...ctor.columns.keys()].filter((name) => !ctor.columns.get(name)?.virtual);
+    if (options.only) names = names.filter((name) => options.only!.includes(name));
+    if (options.except) names = names.filter((name) => !options.except!.includes(name));
+
     const result: Record<string, any> = {};
-    for (const name of ctor.columns.keys()) {
-      result[name] = getAttr(this, name);
+    for (const name of names) result[name] = getAttr(this, name);
+
+    for (const key of options.include ?? []) {
+      const value = getAttr(this, key);
+      result[key] = Array.isArray(value)
+        ? value.map((v) => (v instanceof Model ? v.serializableHash() : v))
+        : value instanceof Model
+          ? value.serializableHash()
+          : value;
     }
+
     return result;
   }
+
+  toJSON(): Record<string, any> {
+    return this.serializableHash();
+  }
+}
+
+export interface SerializeOptions {
+  only?: string[];
+  except?: string[];
+  include?: string[];
 }
 
 /**
@@ -558,6 +633,24 @@ export class QueryChain<T extends typeof Model> implements PromiseLike<InstanceT
   async first(): Promise<InstanceType<T> | undefined> {
     const row = await this.qb.clone().first();
     return row ? this.modelClass.fromRow(row) : undefined;
+  }
+
+  /** Selects just this column and returns the raw values — skips instantiating full model instances. */
+  async pluck<K extends keyof AttributesOf<InstanceType<T>> & string>(
+    column: K
+  ): Promise<Array<AttributesOf<InstanceType<T>>[K]>> {
+    const rows = await this.qb.clone().select(column);
+    return rows.map((row: any) => row[column]);
+  }
+
+  async count(): Promise<number> {
+    const result = await this.qb.clone().count({ count: '*' }).first();
+    return Number(result?.count ?? 0);
+  }
+
+  async exists(): Promise<boolean> {
+    const row = await this.qb.clone().first();
+    return row !== undefined;
   }
 
   then<TResult1 = InstanceType<T>[], TResult2 = never>(
