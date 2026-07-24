@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "prepare": "npm run build",
     "build": "tsc",
     "demo": "ts-node src/example/demo.ts",
     "test": "vitest run",
@@ -18,15 +19,16 @@
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
-  "dependencies": {
-    "knex": "^3.1.0",
-    "sqlite3": "^5.1.7"
+  "peerDependencies": {
+    "knex": "^3.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
+    "knex": "^3.1.0",
     "prettier": "^3.9.6",
+    "sqlite3": "^5.1.7",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4",
     "typescript-eslint": "^8.65.0",
