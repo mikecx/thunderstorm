@@ -129,11 +129,11 @@ Without this, `JSON.stringify` walks every own enumerable property, including `e
 
 ## Querying
 
-`Model.where()` returns a lazy, chainable `QueryChain`. Nothing hits the database until you `await` it or call `.first()`.
+`Model.where()` and `Model.all()` both return a lazy, chainable `QueryChain`. Nothing hits the database until you `await` it or call `.first()`. `all()` is equivalent to `where({})` — every row, but still chainable with `.order()`/`.limit()`, unlike a plain "give me everything" method that just returns an array.
 
 ```ts
 const bobs = await User.where({ name: 'Bob' });
-const newestFirst = await User.where({}).order('createdAt', 'desc').limit(10);
+const newestFirst = await User.all().order('createdAt', 'desc').limit(10);
 const one = await User.where({ email: 'alice@example.com' }).first();
 ```
 

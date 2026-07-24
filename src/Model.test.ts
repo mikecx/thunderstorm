@@ -61,6 +61,17 @@ describe('Model.create / find / all', () => {
     const all = await User.all();
     expect(all.map((u) => u.name).sort()).toEqual(['Alice', 'Bob']);
   });
+
+  it('all() is chainable like where({}), e.g. with order() and first()', async () => {
+    await User.create({ name: 'Bob', email: 'bob@example.com' });
+    await User.create({ name: 'Alice', email: 'alice@example.com' });
+
+    const orderedNames = await User.all().order('name', 'asc');
+    expect(orderedNames.map((u) => u.name)).toEqual(['Alice', 'Bob']);
+
+    const first = await User.all().order('name', 'asc').first();
+    expect(first?.name).toBe('Alice');
+  });
 });
 
 describe('Model.where', () => {

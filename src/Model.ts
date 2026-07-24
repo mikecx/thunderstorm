@@ -142,9 +142,9 @@ export class Model {
     return row ? this.fromRow(row) : undefined;
   }
 
-  static async all<T extends typeof Model>(this: T): Promise<InstanceType<T>[]> {
-    const rows = await this.query().select();
-    return rows.map((row: any) => this.fromRow(row));
+  /** Every row, chainable like where({}) — `await Model.all()`, or `Model.all().order('name', 'asc')`. */
+  static all<T extends typeof Model>(this: T): QueryChain<T> {
+    return new QueryChain(this, this.query());
   }
 
   static where<T extends typeof Model>(this: T, conditions: Partial<AttributesOf<InstanceType<T>>>): QueryChain<T> {
