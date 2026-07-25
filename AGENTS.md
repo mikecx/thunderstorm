@@ -49,18 +49,30 @@ npx tsc --noEmit && npm run lint && npm run format:check && npm test
 - When testing N+1-avoidance or query counts, assert the actual count via `knex.on('query', () => queryCount++)` — don't just assert on the resulting data, which wouldn't catch a regression back to one-query-per-record.
 - `tsconfig.json` excludes `*.test.ts` from the build (`npm run build`) — test files should never end up in `dist/`.
 
+## Releasing
+
+Published to npm as `@mikecx/thunderstorm` (the unscoped name `thunderstorm` was already taken by an unrelated package). Versioning, `CHANGELOG.md`, and publishing are handled by [Changesets](https://github.com/changesets/changesets):
+
+1. Alongside any user-facing change, run `npx changeset` (or `npm run changeset`) and describe it — pick patch/minor/major and write the summary as it should read in the changelog. Commit the generated `.changeset/*.md` file with the change.
+2. On push to `main`, [.github/workflows/release.yml](.github/workflows/release.yml) either opens/updates a "Version Packages" PR (bumping `package.json` + writing `CHANGELOG.md` from the pending changesets) or, if that PR was just merged, builds and publishes to npm via `npm run release`.
+3. Nothing publishes without a changeset — a plain commit with no `.changeset/*.md` file just runs CI, no release PR is touched.
+
+One-time setup this repo needs before the workflow can actually publish (not something an agent can do): an npm account owning the `@mikecx` scope, an npm automation token, and that token saved as the `NPM_TOKEN` secret in the GitHub repo settings.
+
 ## Migrations
 
 `migrations/` is the schema source of truth, applied via the standard Knex CLI (`npm run migrate:latest`, etc. — see README). `src/example/demo.ts` runs the _same_ migrations directory programmatically against a fresh in-memory DB, so if you add a table for a demo/test, add a real migration for it rather than an ad-hoc `knex.schema.createTable` inline in the demo.
 
 ## Commands reference
 
-| Command                                       | Does                                 |
-| --------------------------------------------- | ------------------------------------ |
-| `npm test` / `npm run test:watch`             | Vitest                               |
-| `npx tsc --noEmit`                            | Type check only                      |
-| `npm run build`                               | Emit `dist/` (excludes tests)        |
-| `npm run lint` / `npm run lint:fix`           | ESLint                               |
-| `npm run format` / `npm run format:check`     | Prettier                             |
-| `npm run demo`                                | Run `src/example/demo.ts` end-to-end |
-| `npm run migrate:make/latest/rollback/status` | Knex migration CLI                   |
+| Command                                       | Does                                                                                               |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `npm test` / `npm run test:watch`             | Vitest                                                                                             |
+| `npx tsc --noEmit`                            | Type check only                                                                                    |
+| `npm run build`                               | Emit `dist/` (excludes tests)                                                                      |
+| `npm run lint` / `npm run lint:fix`           | ESLint                                                                                             |
+| `npm run format` / `npm run format:check`     | Prettier                                                                                           |
+| `npm run demo`                                | Run `src/example/demo.ts` end-to-end                                                               |
+| `npm run migrate:make/latest/rollback/status` | Knex migration CLI                                                                                 |
+| `npm run changeset`                           | Describe a change for the next release (see Releasing)                                             |
+| `npm run version-packages`                    | Apply pending changesets locally (bump + changelog) — normally done by the release PR, not by hand |

@@ -8,14 +8,17 @@
 
 A small ActiveRecord/ActiveModel-style ORM for TypeScript, built on top of [Knex](https://knexjs.org). Models are plain classes; schema, validations, and lifecycle hooks are declared with decorators. `Model` (persisted, ActiveRecord-style) is built on `AttributeModel` (validated and dirty-tracked, but not persisted — ActiveModel-style, usable standalone for form objects and DTOs).
 
+## Installation
+
 ```bash
-npm install
-npm run demo    # runs migrations against an in-memory DB and exercises every feature below
-npm test
+npm install @mikecx/thunderstorm knex
 ```
+
+`knex` is a peer dependency — bring your own version (3.x) plus whichever DB driver you need (`pg`, `sqlite3`, `mysql2`, ...). See [Connecting](#connecting) below.
 
 ## Contents
 
+- [Installation](#installation)
 - [Connecting](#connecting)
 - [Defining a model](#defining-a-model)
 - [AttributeModel: attributes without persistence](#attributemodel-attributes-without-persistence)
@@ -690,6 +693,13 @@ npm run test:watch
 They're the most precise documentation of edge cases — e.g. `associations.test.ts` asserts the exact query count `preloadHasMany` issues via `knex.on('query', ...)`, and `transactions.test.ts` asserts a partially-completed multi-step transfer fully rolls back on failure.
 
 ## Development
+
+```bash
+git clone git@github.com:mikecx/thunderstorm.git
+cd thunderstorm
+npm install
+npm run demo    # runs migrations against an in-memory DB and exercises every feature above
+```
 
 ```bash
 npx tsc --noEmit    # type check
