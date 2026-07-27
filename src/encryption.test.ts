@@ -159,7 +159,7 @@ describe('encryptedCaster', () => {
   });
 
   it('null values pass through untouched — no encryption/decryption attempted', async () => {
-    const patient = await Patient.create({ name: 'Alice', diagnosis: null, ssn: null } as any);
+    const patient = await Patient.create({ name: 'Alice', diagnosis: null, ssn: null });
     expect(patient.diagnosis).toBeNull();
 
     const rawRow = await knex('patients').where('id', patient.id).first();

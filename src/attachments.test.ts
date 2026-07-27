@@ -227,7 +227,7 @@ describe('@HasOneAttached', () => {
     const user = await User.create({ email: 'a@example.com' });
     await user.attachAvatar(Buffer.from('one'), { filename: 'a.png', contentType: 'image/png' });
 
-    const permitted = User.permit({ email: 'x@example.com', avatarKey: 'hacked-key' }, ['email', 'avatarKey'] as any);
+    const permitted = User.permit({ email: 'x@example.com', avatarKey: 'hacked-key' }, ['email', 'avatarKey']);
     expect(permitted).not.toHaveProperty('avatarKey');
 
     const json = user.toJSON();
