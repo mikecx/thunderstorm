@@ -36,6 +36,26 @@ class Post extends Model {
   author() {
     return this.belongsTo(User, { foreignKey: 'userId' });
   }
+
+  // many-to-many via a real join Model (hasManyThrough)
+  tags() {
+    return this.hasManyThrough(Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId' });
+  }
+
+  // many-to-many via a bare join table (hasAndBelongsToMany)
+  favoriteTags() {
+    return this.hasAndBelongsToMany(Tag, {
+      joinTable: 'postsFavoriteTags',
+      sourceKey: 'postId',
+      targetKey: 'tagId',
+    });
+  }
+  addFavoriteTag(tag: Tag) {
+    return this.associate(Tag, { joinTable: 'postsFavoriteTags', sourceKey: 'postId', targetKey: 'tagId' }, tag);
+  }
+  removeFavoriteTag(tag: Tag) {
+    return this.dissociate(Tag, { joinTable: 'postsFavoriteTags', sourceKey: 'postId', targetKey: 'tagId' }, tag);
+  }
 }
 
 class Profile extends Model {
@@ -49,6 +69,29 @@ class Profile extends Model {
 
   @Column()
   bio!: string;
+}
+
+class Tag extends Model {
+  static tableName = 'tags';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  name!: string;
+}
+
+class PostTag extends Model {
+  static tableName = 'postTags';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  postId!: number;
+
+  @Column()
+  tagId!: number;
 }
 
 let knex: Knex;
@@ -66,6 +109,9 @@ beforeEach(async () => {
   await knex.schema.dropTableIfExists('posts');
   await knex.schema.dropTableIfExists('profiles');
   await knex.schema.dropTableIfExists('users');
+  await knex.schema.dropTableIfExists('tags');
+  await knex.schema.dropTableIfExists('postTags');
+  await knex.schema.dropTableIfExists('postsFavoriteTags');
   await knex.schema.createTable('users', (t) => {
     t.increments('id');
     t.string('name');
@@ -79,6 +125,19 @@ beforeEach(async () => {
     t.increments('id');
     t.integer('userId');
     t.string('bio');
+  });
+  await knex.schema.createTable('tags', (t) => {
+    t.increments('id');
+    t.string('name');
+  });
+  await knex.schema.createTable('postTags', (t) => {
+    t.increments('id');
+    t.integer('postId');
+    t.integer('tagId');
+  });
+  await knex.schema.createTable('postsFavoriteTags', (t) => {
+    t.integer('postId');
+    t.integer('tagId');
   });
   queryCount = 0;
 });
@@ -204,5 +263,119 @@ describe('preload avoids N+1', () => {
     const post = await Post.create({ title: 'Orphan', userId: 999 });
     await Post.preloadBelongsTo([post], User, { foreignKey: 'userId', as: '_author' });
     expect((post as any)._author).toBeUndefined();
+  });
+});
+
+describe('hasManyThrough (real join Model)', () => {
+  it('returns tags reachable via the join table, and stays lazy/chainable', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const ruby = await Tag.create({ name: 'ruby' });
+    const ts = await Tag.create({ name: 'typescript' });
+    await PostTag.create({ postId: post.id, tagId: ruby.id });
+    await PostTag.create({ postId: post.id, tagId: ts.id });
+
+    const tags = await post.tags();
+    expect(tags.map((t) => t.name).sort()).toEqual(['ruby', 'typescript']);
+
+    const first = await post.tags().order('name', 'asc').first();
+    expect(first?.name).toBe('ruby');
+  });
+
+  it('a post with no join rows has no tags', async () => {
+    const post = await Post.create({ title: 'Untagged', userId: 1 });
+    expect(await post.tags()).toEqual([]);
+  });
+
+  it('the join Model is an ordinary Model — create()/destroy() add and remove the association', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const tag = await Tag.create({ name: 'ruby' });
+    const join = await PostTag.create({ postId: post.id, tagId: tag.id });
+
+    expect((await post.tags()).map((t) => t.name)).toEqual(['ruby']);
+
+    await join.destroy();
+    expect(await post.tags()).toEqual([]);
+  });
+
+  it('a single query fetches tags for the target regardless of how many join rows match', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const ruby = await Tag.create({ name: 'ruby' });
+    const ts = await Tag.create({ name: 'typescript' });
+    await PostTag.create({ postId: post.id, tagId: ruby.id });
+    await PostTag.create({ postId: post.id, tagId: ts.id });
+
+    queryCount = 0;
+    await post.tags();
+    expect(queryCount).toBe(1);
+  });
+
+  it('preloadHasManyThrough fetches every post’s tags in two queries total', async () => {
+    const a = await Post.create({ title: 'A', userId: 1 });
+    const b = await Post.create({ title: 'B', userId: 1 });
+    const ruby = await Tag.create({ name: 'ruby' });
+    const ts = await Tag.create({ name: 'typescript' });
+    await PostTag.create({ postId: a.id, tagId: ruby.id });
+    await PostTag.create({ postId: a.id, tagId: ts.id });
+    await PostTag.create({ postId: b.id, tagId: ruby.id });
+
+    const posts = await Post.all();
+    queryCount = 0;
+    await Post.preloadHasManyThrough(posts, Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId', as: '_tags' });
+
+    expect(queryCount).toBe(2);
+    const byTitle = Object.fromEntries(posts.map((p) => [p.title, (p as any)._tags.map((t: Tag) => t.name).sort()]));
+    expect(byTitle).toEqual({ A: ['ruby', 'typescript'], B: ['ruby'] });
+  });
+
+  it('preloadHasManyThrough short-circuits without querying when given no records', async () => {
+    queryCount = 0;
+    await Post.preloadHasManyThrough([], Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId', as: '_tags' });
+    expect(queryCount).toBe(0);
+  });
+});
+
+describe('hasAndBelongsToMany (bare join table)', () => {
+  it('associate() inserts a join row, and it shows up via the query side', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const ruby = await Tag.create({ name: 'ruby' });
+
+    await post.addFavoriteTag(ruby);
+
+    expect((await post.favoriteTags()).map((t) => t.name)).toEqual(['ruby']);
+  });
+
+  it('dissociate() removes the join row', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const ruby = await Tag.create({ name: 'ruby' });
+    await post.addFavoriteTag(ruby);
+
+    await post.removeFavoriteTag(ruby);
+
+    expect(await post.favoriteTags()).toEqual([]);
+  });
+
+  it('preloadHasAndBelongsToMany fetches every post’s favorite tags in two queries total', async () => {
+    const a = await Post.create({ title: 'A', userId: 1 });
+    const b = await Post.create({ title: 'B', userId: 1 });
+    const ruby = await Tag.create({ name: 'ruby' });
+    const ts = await Tag.create({ name: 'typescript' });
+    await a.addFavoriteTag(ruby);
+    await a.addFavoriteTag(ts);
+    await b.addFavoriteTag(ruby);
+
+    const posts = await Post.all();
+    queryCount = 0;
+    await Post.preloadHasAndBelongsToMany(posts, Tag, {
+      joinTable: 'postsFavoriteTags',
+      sourceKey: 'postId',
+      targetKey: 'tagId',
+      as: '_favoriteTags',
+    });
+
+    expect(queryCount).toBe(2);
+    const byTitle = Object.fromEntries(
+      posts.map((p) => [p.title, (p as any)._favoriteTags.map((t: Tag) => t.name).sort()])
+    );
+    expect(byTitle).toEqual({ A: ['ruby', 'typescript'], B: ['ruby'] });
   });
 });

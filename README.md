@@ -34,6 +34,7 @@ Requires **Node 22+**.
 - [Validations](#validations)
 - [Callbacks](#callbacks)
 - [Associations](#associations)
+- [Many-to-many associations](#many-to-many-associations)
 - [Avoiding N+1 queries](#avoiding-n1-queries)
 - [Dirty tracking](#dirty-tracking)
 - [Attribute casting/serialization](#attribute-castingserialization)
@@ -355,6 +356,53 @@ class Post extends Model {
 - `hasMany` returns a `QueryChain` — `await user.posts()`, or scope it first: `user.posts().order('title', 'asc').first()`.
 - `hasOne`/`belongsTo` return a `Promise` directly — `await post.author()`.
 
+## Many-to-many associations
+
+Two ways to model many-to-many, matching Rails' own distinction. Both stay lazy/chainable like `hasMany` — one query with a `WHERE targetPk IN (subquery)`, not two sequential round-trips.
+
+**`hasManyThrough`** — the join table is a real `Model`, so it can carry its own columns, and adding/removing a row is just ordinary `create()`/`destroy()`:
+
+```ts
+class PostTag extends Model {
+  static tableName = 'postTags';
+  @PrimaryKey() id!: number;
+  @Column() postId!: number;
+  @Column() tagId!: number;
+}
+
+class Post extends Model {
+  tags() {
+    return this.hasManyThrough(Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId' });
+  }
+}
+
+await PostTag.create({ postId: post.id, tagId: tag.id }); // associate
+await post.tags(); // Tag[]
+await join.destroy(); // dissociate
+```
+
+**`hasAndBelongsToMany`** — a bare join table, no `Model` needed, at the cost of nowhere to put extra columns later. Since there's no `create()`/`destroy()` to call on a nonexistent model, pair it with `associate`/`dissociate`:
+
+```ts
+class Post extends Model {
+  favoriteTags() {
+    return this.hasAndBelongsToMany(Tag, { joinTable: 'postsFavoriteTags', sourceKey: 'postId', targetKey: 'tagId' });
+  }
+  addFavoriteTag(tag: Tag) {
+    return this.associate(Tag, { joinTable: 'postsFavoriteTags', sourceKey: 'postId', targetKey: 'tagId' }, tag);
+  }
+  removeFavoriteTag(tag: Tag) {
+    return this.dissociate(Tag, { joinTable: 'postsFavoriteTags', sourceKey: 'postId', targetKey: 'tagId' }, tag);
+  }
+}
+
+await post.addFavoriteTag(tag);
+await post.favoriteTags(); // Tag[]
+await post.removeFavoriteTag(tag);
+```
+
+Neither guards against inserting the same pair twice — pair with a unique index on `(sourceKey, targetKey)` in the migration for that, same as `@Validates({ uniqueness })` elsewhere in this library is a UX nicety, not a concurrency guarantee.
+
 ## Avoiding N+1 queries
 
 Looping over records and calling a relation method fires one query per record. `preloadHasMany`/`preloadBelongsTo` batch-fetch in a single `WHERE ... IN (...)` query and attach the results onto each record under a name you choose:
@@ -371,6 +419,15 @@ users[0]._posts; // Post[]
 
 await Post.preloadBelongsTo(posts, User, { foreignKey: 'userId', as: '_author' });
 posts[0]._author; // User | undefined
+
+// same idea for many-to-many — two queries total, not one per record:
+await Post.preloadHasManyThrough(posts, Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId', as: '_tags' });
+await Post.preloadHasAndBelongsToMany(posts, Tag, {
+  joinTable: 'postsFavoriteTags',
+  sourceKey: 'postId',
+  targetKey: 'tagId',
+  as: '_favoriteTags',
+});
 ```
 
 Pick an `as` name that doesn't collide with a same-named relation method — it's assigned as a plain own property, which would shadow a prototype method of the same name.
@@ -843,7 +900,7 @@ npm run test:watch
 | [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                                               |
 | [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                                  |
 | [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                                     |
-| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, preload query counts                                                                         |
+| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, `hasManyThrough`/`hasAndBelongsToMany`, `associate`/`dissociate`, preload query counts       |
 | [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                                          |
 | [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors, `where()` casting condition values                         |
 | [src/encryption.test.ts](src/encryption.test.ts)         | `encryptedCaster()` — deterministic vs. non-deterministic, queryability, uniqueness, key rotation, wrong-key errors          |

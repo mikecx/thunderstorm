@@ -218,6 +218,78 @@ export class Model extends AttributeModel {
   }
 
   /**
+   * Many-to-many via a real join `Model` (Rails' `has_many :through`) —
+   * `through` owns `sourceKey` (pointing back to this record) and
+   * `targetKey` (pointing to `target`). Stays lazy/chainable like `hasMany`:
+   * builds one query with a `WHERE targetPk IN (subquery)` rather than two
+   * sequential round-trips. Because `through` is an ordinary `Model`, adding
+   * or removing a join row is just `through.create({...})` /
+   * `through.query().where({...}).delete()` — no separate write API needed,
+   * unlike `hasAndBelongsToMany` below.
+   */
+  protected hasManyThrough<T extends typeof Model>(
+    target: T,
+    through: typeof Model,
+    options: { sourceKey: string; targetKey: string; localKey?: string }
+  ): QueryChain<T> {
+    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+    const subquery = through.query().select(options.targetKey).where(options.sourceKey, getAttr(this, localKey));
+    return new QueryChain(target, target.query().whereIn(target.primaryKey, subquery));
+  }
+
+  /**
+   * Many-to-many via a bare join table with no `Model` of its own (Rails'
+   * `has_and_belongs_to_many`) — simpler to set up than `hasManyThrough`
+   * when the join table is genuinely just two foreign keys, at the cost of
+   * losing anywhere to put extra columns/validations on the join row later.
+   * Pair with `associate`/`dissociate` below to add/remove rows, since
+   * there's no join `Model` to call `create()`/`destroy()` on.
+   */
+  protected hasAndBelongsToMany<T extends typeof Model>(
+    target: T,
+    options: { joinTable: string; sourceKey: string; targetKey: string; localKey?: string }
+  ): QueryChain<T> {
+    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+    const subquery = getKnex()(options.joinTable)
+      .select(options.targetKey)
+      .where(options.sourceKey, getAttr(this, localKey));
+    return new QueryChain(target, target.query().whereIn(target.primaryKey, subquery));
+  }
+
+  /**
+   * Inserts a join-table row connecting this record to `record` — the write
+   * side of `hasAndBelongsToMany`, since there's no join `Model` to
+   * `create()` on. Doesn't guard against inserting the same pair twice; pair
+   * with a unique index on `(sourceKey, targetKey)` in the migration for
+   * that, same as `@Validates({ uniqueness })` elsewhere in this library is
+   * a UX nicety, not a concurrency guarantee.
+   */
+  protected async associate<T extends typeof Model>(
+    target: T,
+    options: { joinTable: string; sourceKey: string; targetKey: string; localKey?: string },
+    record: InstanceType<T>
+  ): Promise<void> {
+    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+    await getKnex()(options.joinTable).insert({
+      [options.sourceKey]: getAttr(this, localKey),
+      [options.targetKey]: getAttr(record, target.primaryKey),
+    });
+  }
+
+  /** Deletes the join-table row connecting this record to `record`, if one exists. */
+  protected async dissociate<T extends typeof Model>(
+    target: T,
+    options: { joinTable: string; sourceKey: string; targetKey: string; localKey?: string },
+    record: InstanceType<T>
+  ): Promise<void> {
+    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+    await getKnex()(options.joinTable)
+      .where(options.sourceKey, getAttr(this, localKey))
+      .where(options.targetKey, getAttr(record, target.primaryKey))
+      .delete();
+  }
+
+  /**
    * Batch-loads a hasMany association for a whole result set in one query
    * (`WHERE foreignKey IN (...)`) instead of one query per record, and
    * attaches the grouped results onto each record under `options.as`.
@@ -268,6 +340,39 @@ export class Model extends AttributeModel {
     for (const record of records) {
       setAttr(record, options.as, byKey.get(getAttr(record, options.foreignKey)));
     }
+  }
+
+  /**
+   * Batch-loads a `hasManyThrough` association for a whole result set in two
+   * queries total (one against `through`, one against `target`) regardless
+   * of how many `records` there are — same N+1-avoidance as `preloadHasMany`.
+   */
+  static async preloadHasManyThrough<T extends typeof Model, R extends typeof Model>(
+    this: T,
+    records: InstanceType<T>[],
+    target: R,
+    through: typeof Model,
+    options: { sourceKey: string; targetKey: string; localKey?: string; as: string }
+  ): Promise<void> {
+    if (records.length === 0) return;
+    const localKey = options.localKey ?? this.primaryKey;
+    const localIds = [...new Set(records.map((r) => getAttr(r, localKey)))];
+    const joinRows = await through.query().whereIn(options.sourceKey, localIds);
+    await groupAndAttachThrough(records, target, joinRows, options.sourceKey, options.targetKey, localKey, options.as);
+  }
+
+  /** Batch-loads a `hasAndBelongsToMany` association — same shape as `preloadHasManyThrough`, minus the join `Model`. */
+  static async preloadHasAndBelongsToMany<T extends typeof Model, R extends typeof Model>(
+    this: T,
+    records: InstanceType<T>[],
+    target: R,
+    options: { joinTable: string; sourceKey: string; targetKey: string; localKey?: string; as: string }
+  ): Promise<void> {
+    if (records.length === 0) return;
+    const localKey = options.localKey ?? this.primaryKey;
+    const localIds = [...new Set(records.map((r) => getAttr(r, localKey)))];
+    const joinRows = await getKnex()(options.joinTable).whereIn(options.sourceKey, localIds);
+    await groupAndAttachThrough(records, target, joinRows, options.sourceKey, options.targetKey, localKey, options.as);
   }
 
   // --- lifecycle callbacks -------------------------------------------------
@@ -465,6 +570,44 @@ function castConditions(ctor: typeof Model, conditions: Record<string, any>): Re
     result[key] = ctor.castForWrite(key, value);
   }
   return result;
+}
+
+/**
+ * Shared grouping logic for `preloadHasManyThrough`/`preloadHasAndBelongsToMany`
+ * — identical once `joinRows` are in hand, they only differ in how those rows
+ * get fetched (a join `Model` vs. a bare table name).
+ */
+async function groupAndAttachThrough<R extends typeof Model>(
+  records: Model[],
+  target: R,
+  joinRows: Array<Record<string, any>>,
+  sourceKey: string,
+  targetKey: string,
+  localKey: string,
+  as: string
+): Promise<void> {
+  const targetIdsBySource = new Map<any, any[]>();
+  for (const row of joinRows) {
+    const list = targetIdsBySource.get(row[sourceKey]) ?? [];
+    list.push(row[targetKey]);
+    targetIdsBySource.set(row[sourceKey], list);
+  }
+
+  const allTargetIds = [...new Set(joinRows.map((row) => row[targetKey]))];
+  const targetRows = allTargetIds.length > 0 ? await target.query().whereIn(target.primaryKey, allTargetIds) : [];
+  const targetsById = new Map<any, InstanceType<R>>();
+  for (const row of targetRows) {
+    targetsById.set(row[target.primaryKey], target.fromRow(row));
+  }
+
+  for (const record of records) {
+    const ids = targetIdsBySource.get(getAttr(record, localKey)) ?? [];
+    setAttr(
+      record,
+      as,
+      ids.map((id) => targetsById.get(id)).filter((instance): instance is InstanceType<R> => instance !== undefined)
+    );
+  }
 }
 
 /**
