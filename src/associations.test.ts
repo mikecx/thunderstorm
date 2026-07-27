@@ -56,6 +56,23 @@ class Post extends Model {
   removeFavoriteTag(tag: Tag) {
     return this.dissociate(Tag, { joinTable: 'postsFavoriteTags', sourceKey: 'postId', targetKey: 'tagId' }, tag);
   }
+
+  // polymorphic
+  comments() {
+    return this.hasManyPolymorphic(Comment, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      typeValue: 'post',
+    });
+  }
+
+  latestComment() {
+    return this.hasOnePolymorphic(Comment, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      typeValue: 'post',
+    });
+  }
 }
 
 class Profile extends Model {
@@ -94,6 +111,46 @@ class PostTag extends Model {
   tagId!: number;
 }
 
+class Photo extends Model {
+  static tableName = 'photos';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  url!: string;
+
+  comments() {
+    return this.hasManyPolymorphic(Comment, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      typeValue: 'photo',
+    });
+  }
+}
+
+const COMMENTABLE_TYPES = { post: Post, photo: Photo };
+
+class Comment extends Model {
+  static tableName = 'comments';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  body!: string;
+
+  @Column()
+  commentableId!: number;
+
+  @Column()
+  commentableType!: string;
+
+  commentable() {
+    return this.belongsToPolymorphic({ idField: 'commentableId', typeField: 'commentableType' }, COMMENTABLE_TYPES);
+  }
+}
+
 let knex: Knex;
 let queryCount: number;
 
@@ -112,6 +169,8 @@ beforeEach(async () => {
   await knex.schema.dropTableIfExists('tags');
   await knex.schema.dropTableIfExists('postTags');
   await knex.schema.dropTableIfExists('postsFavoriteTags');
+  await knex.schema.dropTableIfExists('photos');
+  await knex.schema.dropTableIfExists('comments');
   await knex.schema.createTable('users', (t) => {
     t.increments('id');
     t.string('name');
@@ -138,6 +197,16 @@ beforeEach(async () => {
   await knex.schema.createTable('postsFavoriteTags', (t) => {
     t.integer('postId');
     t.integer('tagId');
+  });
+  await knex.schema.createTable('photos', (t) => {
+    t.increments('id');
+    t.string('url');
+  });
+  await knex.schema.createTable('comments', (t) => {
+    t.increments('id');
+    t.string('body');
+    t.integer('commentableId');
+    t.string('commentableType');
   });
   queryCount = 0;
 });
@@ -377,5 +446,117 @@ describe('hasAndBelongsToMany (bare join table)', () => {
       posts.map((p) => [p.title, (p as any)._favoriteTags.map((t: Tag) => t.name).sort()])
     );
     expect(byTitle).toEqual({ A: ['ruby', 'typescript'], B: ['ruby'] });
+  });
+});
+
+describe('polymorphic associations', () => {
+  it('hasManyPolymorphic only matches comments with the matching type, not just the matching id', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const photo = await Photo.create({ url: 'a.png' });
+    // deliberately share the same numeric id across both tables to prove the type filter matters
+    await Comment.create({ body: 'on the post', commentableId: post.id, commentableType: 'post' });
+    await Comment.create({ body: 'on the photo', commentableId: photo.id, commentableType: 'photo' });
+
+    const postComments = await post.comments();
+    expect(postComments.map((c) => c.body)).toEqual(['on the post']);
+
+    const photoComments = await photo.comments();
+    expect(photoComments.map((c) => c.body)).toEqual(['on the photo']);
+  });
+
+  it('hasOnePolymorphic returns the first match', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    await Comment.create({ body: 'first', commentableId: post.id, commentableType: 'post' });
+    await Comment.create({ body: 'second', commentableId: post.id, commentableType: 'post' });
+
+    const latest = await post.latestComment();
+    expect(latest?.body).toBe('first');
+  });
+
+  it('belongsToPolymorphic resolves to the right target class based on the type column', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const photo = await Photo.create({ url: 'a.png' });
+    const onPost = await Comment.create({ body: 'x', commentableId: post.id, commentableType: 'post' });
+    const onPhoto = await Comment.create({ body: 'y', commentableId: photo.id, commentableType: 'photo' });
+
+    const postResolved = await onPost.commentable();
+    expect(postResolved).toBeInstanceOf(Post);
+    expect((postResolved as Post).title).toBe('A');
+
+    const photoResolved = await onPhoto.commentable();
+    expect(photoResolved).toBeInstanceOf(Photo);
+    expect((photoResolved as Photo).url).toBe('a.png');
+  });
+
+  it('belongsToPolymorphic resolves to undefined for an unrecognized type string', async () => {
+    const comment = await Comment.create({ body: 'x', commentableId: 1, commentableType: 'video' });
+    expect(await comment.commentable()).toBeUndefined();
+  });
+
+  it('preloadHasManyPolymorphic fetches every post’s comments in a single query, respecting the type filter', async () => {
+    const a = await Post.create({ title: 'A', userId: 1 });
+    const b = await Post.create({ title: 'B', userId: 1 });
+    await Comment.create({ body: 'a1', commentableId: a.id, commentableType: 'post' });
+    await Comment.create({ body: 'a2', commentableId: a.id, commentableType: 'post' });
+    await Comment.create({ body: 'b1', commentableId: b.id, commentableType: 'post' });
+    await Comment.create({ body: 'fake', commentableId: a.id, commentableType: 'photo' }); // shares a.id, wrong type
+
+    const posts = await Post.all();
+    queryCount = 0;
+    await Post.preloadHasManyPolymorphic(posts, Comment, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      typeValue: 'post',
+      as: '_comments',
+    });
+
+    expect(queryCount).toBe(1);
+    const byTitle = Object.fromEntries(
+      posts.map((p) => [p.title, (p as any)._comments.map((c: Comment) => c.body).sort()])
+    );
+    expect(byTitle).toEqual({ A: ['a1', 'a2'], B: ['b1'] });
+  });
+
+  it('preloadBelongsToPolymorphic resolves mixed-type records in one query per distinct type present', async () => {
+    const post = await Post.create({ title: 'A', userId: 1 });
+    const photo = await Photo.create({ url: 'a.png' });
+    await Comment.create({ body: 'x', commentableId: post.id, commentableType: 'post' });
+    await Comment.create({ body: 'y', commentableId: photo.id, commentableType: 'photo' });
+
+    const comments = await Comment.all();
+    queryCount = 0;
+    await Comment.preloadBelongsToPolymorphic(comments, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      types: COMMENTABLE_TYPES,
+      as: '_commentable',
+    });
+
+    expect(queryCount).toBe(2); // one query for the "post" bucket, one for the "photo" bucket
+    const byBody = Object.fromEntries(comments.map((c) => [c.body, (c as any)._commentable]));
+    expect(byBody['x']).toBeInstanceOf(Post);
+    expect(byBody['y']).toBeInstanceOf(Photo);
+  });
+
+  it('preloadBelongsToPolymorphic leaves `as` undefined for an unrecognized type string', async () => {
+    const comment = await Comment.create({ body: 'x', commentableId: 1, commentableType: 'video' });
+    await Comment.preloadBelongsToPolymorphic([comment], {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      types: COMMENTABLE_TYPES,
+      as: '_commentable',
+    });
+    expect((comment as any)._commentable).toBeUndefined();
+  });
+
+  it('preloadHasManyPolymorphic short-circuits without querying when given no records', async () => {
+    queryCount = 0;
+    await Post.preloadHasManyPolymorphic([], Comment, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      typeValue: 'post',
+      as: '_comments',
+    });
+    expect(queryCount).toBe(0);
   });
 });

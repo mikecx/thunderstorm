@@ -35,6 +35,7 @@ Requires **Node 22+**.
 - [Callbacks](#callbacks)
 - [Associations](#associations)
 - [Many-to-many associations](#many-to-many-associations)
+- [Polymorphic associations](#polymorphic-associations)
 - [Avoiding N+1 queries](#avoiding-n1-queries)
 - [Dirty tracking](#dirty-tracking)
 - [Attribute casting/serialization](#attribute-castingserialization)
@@ -403,6 +404,41 @@ await post.removeFavoriteTag(tag);
 
 Neither guards against inserting the same pair twice — pair with a unique index on `(sourceKey, targetKey)` in the migration for that, same as `@Validates({ uniqueness })` elsewhere in this library is a UX nicety, not a concurrency guarantee.
 
+## Polymorphic associations
+
+A record can `belongsTo` one of several possible target types (Rails' `belongs_to :commentable, polymorphic: true`) by pairing an id column with a type column:
+
+```ts
+const COMMENTABLE_TYPES = { post: Post, photo: Photo }; // stable strings you choose, mapped to the classes they mean
+
+class Comment extends Model {
+  static tableName = 'comments';
+  @PrimaryKey() id!: number;
+  @Column() commentableId!: number;
+  @Column() commentableType!: string;
+
+  commentable() {
+    return this.belongsToPolymorphic({ idField: 'commentableId', typeField: 'commentableType' }, COMMENTABLE_TYPES);
+  }
+}
+
+class Post extends Model {
+  comments() {
+    return this.hasManyPolymorphic(Comment, {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      typeValue: 'post',
+    });
+  }
+}
+```
+
+Unlike Rails' default of using the class name as the type string (`commentable_type = 'Post'`), thunderstorm requires an explicit map (`COMMENTABLE_TYPES` above) — consistent with `tableName`/`foreignKey` always being explicit elsewhere in this library, and it means renaming a model class can never silently orphan every row that already references it under the old name.
+
+- `belongsToPolymorphic` resolves to the right target class based on the type column's value, or `undefined` if the type string isn't in the map (an unrecognized/legacy type) or the id is `null`.
+- `hasManyPolymorphic`/`hasOnePolymorphic` are the reverse side — same shape as `hasMany`/`hasOne`, plus a `typeValue` that must also match, so a comment on a `Photo` with the same numeric id as a `Post` never leaks in.
+- `preloadHasManyPolymorphic` batches like `preloadHasMany` (one query). `preloadBelongsToPolymorphic` can't stay to one query the way `preloadBelongsTo` does — since different records may reference different target tables, it groups by the type column first and runs one batched query per distinct type actually present, still bounded rather than one query per record.
+
 ## Avoiding N+1 queries
 
 Looping over records and calling a relation method fires one query per record. `preloadHasMany`/`preloadBelongsTo` batch-fetch in a single `WHERE ... IN (...)` query and attach the results onto each record under a name you choose:
@@ -427,6 +463,20 @@ await Post.preloadHasAndBelongsToMany(posts, Tag, {
   sourceKey: 'postId',
   targetKey: 'tagId',
   as: '_favoriteTags',
+});
+
+// same idea for polymorphic associations:
+await Post.preloadHasManyPolymorphic(posts, Comment, {
+  idField: 'commentableId',
+  typeField: 'commentableType',
+  typeValue: 'post',
+  as: '_comments',
+});
+await Comment.preloadBelongsToPolymorphic(comments, {
+  idField: 'commentableId',
+  typeField: 'commentableType',
+  types: COMMENTABLE_TYPES,
+  as: '_commentable',
 });
 ```
 
@@ -900,7 +950,7 @@ npm run test:watch
 | [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                                               |
 | [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                                  |
 | [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                                     |
-| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, `hasManyThrough`/`hasAndBelongsToMany`, `associate`/`dissociate`, preload query counts       |
+| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, `hasManyThrough`/`hasAndBelongsToMany`, `belongsToPolymorphic`/`hasManyPolymorphic`/`hasOnePolymorphic`, preload query counts |
 | [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                                          |
 | [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors, `where()` casting condition values                         |
 | [src/encryption.test.ts](src/encryption.test.ts)         | `encryptedCaster()` — deterministic vs. non-deterministic, queryability, uniqueness, key rotation, wrong-key errors          |
