@@ -22,6 +22,8 @@ Requires **Node 22+**.
 
 ## Contents
 
+### Core
+
 - [Installation](#installation)
 - [Connecting](#connecting)
 - [Defining a model](#defining-a-model)
@@ -34,13 +36,18 @@ Requires **Node 22+**.
 - [Validations](#validations)
 - [Callbacks](#callbacks)
 - [Associations](#associations)
-- [Many-to-many associations](#many-to-many-associations)
-- [Polymorphic associations](#polymorphic-associations)
 - [Avoiding N+1 queries](#avoiding-n1-queries)
 - [Dirty tracking](#dirty-tracking)
 - [Attribute casting/serialization](#attribute-castingserialization)
-- [Column encryption](#column-encryption)
 - [Virtual attributes and defaults](#virtual-attributes-and-defaults)
+
+### Advanced / opt-in features
+
+Collapsed below by default — click a heading to expand it.
+
+- [Many-to-many associations](#many-to-many-associations)
+- [Polymorphic associations](#polymorphic-associations)
+- [Column encryption](#column-encryption)
 - [Custom accessors/setters](#custom-accessorssetters)
 - [Delegate](#delegate)
 - [Scopes](#scopes)
@@ -53,6 +60,9 @@ Requires **Node 22+**.
 - [Migrations](#migrations)
 - [Escape hatch: raw SQL](#escape-hatch-raw-sql)
 - [TypeScript typing notes](#typescript-typing-notes)
+
+### Project
+
 - [Testing](#testing)
 - [Development](#development)
 
@@ -357,7 +367,98 @@ class Post extends Model {
 - `hasMany` returns a `QueryChain` — `await user.posts()`, or scope it first: `user.posts().order('title', 'asc').first()`.
 - `hasOne`/`belongsTo` return a `Promise` directly — `await post.author()`.
 
+See [Many-to-many associations](#many-to-many-associations) and [Polymorphic associations](#polymorphic-associations) below for the less-common shapes.
+
+## Avoiding N+1 queries
+
+Looping over records and calling a relation method fires one query per record. `preloadHasMany`/`preloadBelongsTo` batch-fetch in a single `WHERE ... IN (...)` query and attach the results onto each record under a name you choose:
+
+```ts
+const users = await User.all();
+
+// naive: 1 query per user
+for (const u of users) await u.posts();
+
+// batched: 1 query total
+await User.preloadHasMany(users, Post, { foreignKey: 'userId', as: '_posts' });
+users[0]._posts; // Post[]
+
+await Post.preloadBelongsTo(posts, User, { foreignKey: 'userId', as: '_author' });
+posts[0]._author; // User | undefined
+```
+
+Pick an `as` name that doesn't collide with a same-named relation method — it's assigned as a plain own property, which would shadow a prototype method of the same name. The many-to-many and polymorphic association sections below have their own `preload*` equivalents.
+
+## Dirty tracking
+
+Every model tracks its column values against a snapshot taken on load/save, ActiveModel::Dirty-style:
+
+```ts
+const user = await User.find(1);
+user.isChanged; // false
+
+user.email = 'new@example.com';
+user.isChanged; // true
+user.isAttributeChanged('email'); // true
+user.changes; // { email: ['old@example.com', 'new@example.com'] }
+
+await user.save();
+user.isChanged; // false — reset after a successful save
+user.previousChanges; // { email: ['old@example.com', 'new@example.com'] }
+
+user.email = 'discard-me@example.com';
+await user.reload(); // re-fetches from the DB, discarding the unsaved change
+```
+
+Reassigning a column to its current value doesn't mark it changed (compared with `Object.is`). `save()`'s UPDATE path only writes columns present in `changes` (a partial write) — two in-memory copies of the same row editing different columns can both `save()` without clobbering each other's edit.
+
+## Attribute casting/serialization
+
+`@Column({ type: ... })` converts between the raw DB value and the JS attribute value on load/save. Built-in types: `'string'`, `'number'`, `'boolean'`, `'date'`, `'json'`.
+
+```ts
+@Column({ type: 'boolean' }) paid!: boolean;      // sqlite 0/1 <-> real JS boolean
+@Column({ type: 'date' }) placedAt!: Date;        // ISO string column <-> real Date instance
+@Column({ type: 'json' }) metadata!: Record<string, any>; // JSON text column <-> real object
+```
+
+`boolean.save` passes the value through unchanged — Knex's sqlite3 dialect already converts `true`/`false` to `1`/`0` for every param, and Postgres/MySQL drivers accept real booleans natively, so converting here too would only break those dialects.
+
+Dirty tracking (`changes`/`isChanged`) compares `Date` values by timestamp, not by reference, so assigning a new `Date` instance representing the same moment doesn't count as a change.
+
+For anything the built-ins don't cover, pass a custom caster instead of a type name:
+
+```ts
+@Column({ type: { load: (raw) => new Decimal(raw), save: (value) => value.toString() } })
+price!: Decimal;
+```
+
+See [Column encryption](#column-encryption) below for a real-world custom caster.
+
+## Virtual attributes and defaults
+
+`@Column({ virtual: true })` declares an attribute that's tracked, validated, and dirty-tracked exactly like any other column, but is never sent to the database — excluded from `INSERT`/`UPDATE` and from the default `toJSON()`/`serializableHash()` output. Use it for fields that only make sense in memory: password confirmation, a search form's filter params, anything with no backing column.
+
+```ts
+class SignupForm extends Model {
+  @Column() password!: string;
+  @Column({ virtual: true }) passwordConfirmation!: string;
+}
+```
+
+`@Column({ default: value })` fills in the attribute in the constructor when it's still `undefined` — it never overrides an explicitly-provided value, and never applies to a record loaded from the database (a loaded row's real value, even `NULL`, always wins). Use a function for mutable defaults (objects/arrays): a bare literal default would be the _same_ shared object across every instance that doesn't set it explicitly, so mutating one instance's default would corrupt every other one.
+
+```ts
+@Column({ default: 'pending' }) status!: string; // primitives are safe as literals
+@Column({ type: 'json', default: () => ({}) }) metadata!: Record<string, any>; // objects need a function
+```
+
+<details>
+<summary>
+
 ## Many-to-many associations
+
+</summary>
 
 Two ways to model many-to-many, matching Rails' own distinction. Both stay lazy/chainable like `hasMany` — one query with a `WHERE targetPk IN (subquery)`, not two sequential round-trips.
 
@@ -404,7 +505,26 @@ await post.removeFavoriteTag(tag);
 
 Neither guards against inserting the same pair twice — pair with a unique index on `(sourceKey, targetKey)` in the migration for that, same as `@Validates({ uniqueness })` elsewhere in this library is a UX nicety, not a concurrency guarantee.
 
+`preloadHasManyThrough`/`preloadHasAndBelongsToMany` batch like `preloadHasMany` — see [Avoiding N+1 queries](#avoiding-n1-queries):
+
+```ts
+await Post.preloadHasManyThrough(posts, Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId', as: '_tags' });
+await Post.preloadHasAndBelongsToMany(posts, Tag, {
+  joinTable: 'postsFavoriteTags',
+  sourceKey: 'postId',
+  targetKey: 'tagId',
+  as: '_favoriteTags',
+});
+```
+
+</details>
+
+<details>
+<summary>
+
 ## Polymorphic associations
+
+</summary>
 
 A record can `belongsTo` one of several possible target types (Rails' `belongs_to :commentable, polymorphic: true`) by pairing an id column with a type column:
 
@@ -437,35 +557,9 @@ Unlike Rails' default of using the class name as the type string (`commentable_t
 
 - `belongsToPolymorphic` resolves to the right target class based on the type column's value, or `undefined` if the type string isn't in the map (an unrecognized/legacy type) or the id is `null`.
 - `hasManyPolymorphic`/`hasOnePolymorphic` are the reverse side — same shape as `hasMany`/`hasOne`, plus a `typeValue` that must also match, so a comment on a `Photo` with the same numeric id as a `Post` never leaks in.
-- `preloadHasManyPolymorphic` batches like `preloadHasMany` (one query). `preloadBelongsToPolymorphic` can't stay to one query the way `preloadBelongsTo` does — since different records may reference different target tables, it groups by the type column first and runs one batched query per distinct type actually present, still bounded rather than one query per record.
-
-## Avoiding N+1 queries
-
-Looping over records and calling a relation method fires one query per record. `preloadHasMany`/`preloadBelongsTo` batch-fetch in a single `WHERE ... IN (...)` query and attach the results onto each record under a name you choose:
+- `preloadHasManyPolymorphic` batches like `preloadHasMany` (one query). `preloadBelongsToPolymorphic` can't stay to one query the way `preloadBelongsTo` does — since different records may reference different target tables, it groups by the type column first and runs one batched query per distinct type actually present, still bounded rather than one query per record:
 
 ```ts
-const users = await User.all();
-
-// naive: 1 query per user
-for (const u of users) await u.posts();
-
-// batched: 1 query total
-await User.preloadHasMany(users, Post, { foreignKey: 'userId', as: '_posts' });
-users[0]._posts; // Post[]
-
-await Post.preloadBelongsTo(posts, User, { foreignKey: 'userId', as: '_author' });
-posts[0]._author; // User | undefined
-
-// same idea for many-to-many — two queries total, not one per record:
-await Post.preloadHasManyThrough(posts, Tag, PostTag, { sourceKey: 'postId', targetKey: 'tagId', as: '_tags' });
-await Post.preloadHasAndBelongsToMany(posts, Tag, {
-  joinTable: 'postsFavoriteTags',
-  sourceKey: 'postId',
-  targetKey: 'tagId',
-  as: '_favoriteTags',
-});
-
-// same idea for polymorphic associations:
 await Post.preloadHasManyPolymorphic(posts, Comment, {
   idField: 'commentableId',
   typeField: 'commentableType',
@@ -480,53 +574,14 @@ await Comment.preloadBelongsToPolymorphic(comments, {
 });
 ```
 
-Pick an `as` name that doesn't collide with a same-named relation method — it's assigned as a plain own property, which would shadow a prototype method of the same name.
+</details>
 
-## Dirty tracking
-
-Every model tracks its column values against a snapshot taken on load/save, ActiveModel::Dirty-style:
-
-```ts
-const user = await User.find(1);
-user.isChanged; // false
-
-user.email = 'new@example.com';
-user.isChanged; // true
-user.isAttributeChanged('email'); // true
-user.changes; // { email: ['old@example.com', 'new@example.com'] }
-
-await user.save();
-user.isChanged; // false — reset after a successful save
-user.previousChanges; // { email: ['old@example.com', 'new@example.com'] }
-
-user.email = 'discard-me@example.com';
-await user.reload(); // re-fetches from the DB, discarding the unsaved change
-```
-
-Reassigning a column to its current value doesn't mark it changed (compared with `Object.is`). `save()`'s UPDATE path only writes columns present in `changes` (a partial write) — two in-memory copies of the same row editing different columns can both `save()` without clobbering each other's edit.
-
-## Attribute casting/serialization
-
-`@Column({ type: ... })` converts between the raw DB value and the JS attribute value on load/save. Built-in types: `'string'`, `'number'`, `'boolean'`, `'date'`, `'json'`.
-
-```ts
-@Column({ type: 'boolean' }) paid!: boolean;      // sqlite 0/1 <-> real JS boolean
-@Column({ type: 'date' }) placedAt!: Date;        // ISO string column <-> real Date instance
-@Column({ type: 'json' }) metadata!: Record<string, any>; // JSON text column <-> real object
-```
-
-`boolean.save` passes the value through unchanged — Knex's sqlite3 dialect already converts `true`/`false` to `1`/`0` for every param, and Postgres/MySQL drivers accept real booleans natively, so converting here too would only break those dialects.
-
-Dirty tracking (`changes`/`isChanged`) compares `Date` values by timestamp, not by reference, so assigning a new `Date` instance representing the same moment doesn't count as a change.
-
-For anything the built-ins don't cover, pass a custom caster instead of a type name:
-
-```ts
-@Column({ type: { load: (raw) => new Decimal(raw), save: (value) => value.toString() } })
-price!: Decimal;
-```
+<details>
+<summary>
 
 ## Column encryption
+
+</summary>
 
 `encryptedCaster()` is exactly that kind of custom caster — there's no separate decorator for encryption, just `@Column({ type: encryptedCaster({ keys: [key] }) })`. AES-256-GCM via Node's built-in `crypto`, no external dependency:
 
@@ -561,25 +616,14 @@ encryptedCaster({ keys: [newKey, oldKey] });
 
 Rotation isn't automatic re-encryption, though — reading and re-saving the _same_ value won't rewrite it, since dirty tracking only sends columns whose JS-level value actually changed. Migrating existing rows off an old key needs to force the write (e.g. a script that reads, then writes back a value dirty tracking will actually notice as changed, or a raw `UPDATE`).
 
-## Virtual attributes and defaults
+</details>
 
-`@Column({ virtual: true })` declares an attribute that's tracked, validated, and dirty-tracked exactly like any other column, but is never sent to the database — excluded from `INSERT`/`UPDATE` and from the default `toJSON()`/`serializableHash()` output. Use it for fields that only make sense in memory: password confirmation, a search form's filter params, anything with no backing column.
-
-```ts
-class SignupForm extends Model {
-  @Column() password!: string;
-  @Column({ virtual: true }) passwordConfirmation!: string;
-}
-```
-
-`@Column({ default: value })` fills in the attribute in the constructor when it's still `undefined` — it never overrides an explicitly-provided value, and never applies to a record loaded from the database (a loaded row's real value, even `NULL`, always wins). Use a function for mutable defaults (objects/arrays): a bare literal default would be the _same_ shared object across every instance that doesn't set it explicitly, so mutating one instance's default would corrupt every other one.
-
-```ts
-@Column({ default: 'pending' }) status!: string; // primitives are safe as literals
-@Column({ type: 'json', default: () => ({}) }) metadata!: Record<string, any>; // objects need a function
-```
+<details>
+<summary>
 
 ## Custom accessors/setters
+
+</summary>
 
 `@Column()` can decorate a getter/setter pair instead of a plain field — normal TypeScript accessors, no separate framework API needed. Decorate only the first of the pair (a TS requirement for accessors in general):
 
@@ -604,7 +648,14 @@ new Order({ code: '  ab-123  ' }).code; // 'AB-123'
 
 The setter also runs when loading a row from the database (there's no separate "internal write" path), so keep it idempotent — normalizing an already-normalized value should be a no-op.
 
+</details>
+
+<details>
+<summary>
+
 ## Delegate
+
+</summary>
 
 `@Delegate(['name', 'email'], { to: 'author' })` on a class with an `author()` relation method generates async `authorName()`/`authorEmail()` methods forwarding through it — equivalent to `(await post.author())?.name`.
 
@@ -621,7 +672,14 @@ await post.authorName(); // string | undefined
 
 The relation is awaited (associations here are lazy/async, unlike Rails' in-memory objects). The generated method isn't visible to the type checker on its own — see [TypeScript typing notes](#typescript-typing-notes) for how to type it.
 
+</details>
+
+<details>
+<summary>
+
 ## Scopes
+
+</summary>
 
 A scope is just a static method returning (or extending) `this.where(...)` — no decorator, the same pattern as `hasMany`/`belongsTo`:
 
@@ -645,7 +703,14 @@ await Post.published()
   .apply((c) => c.limit(10));
 ```
 
+</details>
+
+<details>
+<summary>
+
 ## Timestamps
+
+</summary>
 
 `Timestamped(Base)` is a mixin — not a decorator — that adds `createdAt`/`updatedAt` as real, statically-typed `Date` properties, auto-stamped via `beforeCreate`/`beforeUpdate` callbacks:
 
@@ -663,7 +728,14 @@ post.updatedAt; // Date, bumped on every save
 
 It's a mixin rather than `@Timestamps()` specifically so `post.createdAt` type-checks with no extra work — see [TypeScript typing notes](#typescript-typing-notes) for why that matters and how `@Delegate`/`@Enum` differ.
 
+</details>
+
+<details>
+<summary>
+
 ## Enums
+
+</summary>
 
 `@Enum('status', { draft: 0, published: 1, archived: 2 })` maps a raw column to named labels without touching how the raw column itself is read/written — keep a normal `@Column()` on it. Generates:
 
@@ -678,7 +750,14 @@ post.isDraft(); // true — one is<Label>() predicate per label
 Post.withStatus('draft'); // QueryChain<Post> — a static scope, throws on an unknown label
 ```
 
+</details>
+
+<details>
+<summary>
+
 ## SecurePassword
+
+</summary>
 
 `SecurePassword(Base)` is a mixin (same pattern as `Timestamped`) mirroring Rails' `has_secure_password`: hardcoded columns `password` (virtual), `passwordConfirmation` (virtual), `passwordDigest` (real, `guarded`), and an `authenticate()` method. Hashed with Node's built-in `scrypt` — no bcrypt dependency.
 
@@ -702,7 +781,14 @@ await user.update({ password: 'newpassword' }); // re-hashes; the old password s
 - If `passwordConfirmation` is set, it must match `password`, or the save fails with a `passwordConfirmation` error.
 - `passwordDigest` is `guarded`: it can never come from `permit()`-filtered input, and it's excluded from `serializableHash()`/`toJSON()`'s default output.
 
+</details>
+
+<details>
+<summary>
+
 ## SecureToken
+
+</summary>
 
 `SecureToken(Base)` generates a random URL-safe `token` column on create if one wasn't provided, plus `regenerateToken()` — mirroring `has_secure_token`. Useful for API keys, invite links, "remember me" tokens.
 
@@ -721,7 +807,14 @@ await key.regenerateToken(); // replaces and persists a new token
 
 `token` is `guarded`, same reasoning as `passwordDigest` — it's server-generated, never something that should arrive via mass-assigned input or leak into a default API response.
 
+</details>
+
+<details>
+<summary>
+
 ## File attachments
+
+</summary>
 
 Attach files to a record without thunderstorm ever touching the actual bytes: it persists blob metadata (key, filename, content type, byte size) and orchestrates two functions you provide — `put`/`delete` — so key generation and storage cleanup are guaranteed, not opt-in caller discipline.
 
@@ -847,7 +940,14 @@ export async function down(knex: Knex): Promise<void> {
 - Destroy-time cleanup is synchronous and best-effort, not transactional: there's no job queue backing it, so a `storage.delete` failure during `destroy()` makes the whole call reject even though the database row is already gone — you'll see the error and know to retry cleanup, it won't silently leak.
 - Buffers only, no streaming — the whole file needs to be in memory to compute `byteSize`, unlike Rails' IO-stream-based blobs. Fine for avatars/typical uploads, not huge files.
 
+</details>
+
+<details>
+<summary>
+
 ## Transactions
+
+</summary>
 
 `transaction(fn)` runs `fn` inside a real database transaction. Every `Model` call made anywhere inside it — including in nested async calls — implicitly participates, with **no `trx` parameter to thread through anything**: it's backed by Node's `AsyncLocalStorage`, so `getKnex()` resolves to the active transaction automatically for the lifetime of that async context.
 
@@ -865,7 +965,14 @@ await transaction(async () => {
 
 Resolves/commits if `fn` resolves, rejects/rolls back if `fn` throws. `Model.transaction(fn)` is an equivalent static alias. Calling `transaction()` again while already inside one just reuses the same transaction (no savepoints/nested transactions).
 
+</details>
+
+<details>
+<summary>
+
 ## Migrations
+
+</summary>
 
 Schema lives in `migrations/`, run via the standard Knex CLI (`knexfile.ts` at the project root, `development` and `test` sqlite environments already configured):
 
@@ -895,7 +1002,14 @@ export async function down(knex: Knex): Promise<void> {
 
 `npm run demo` doesn't touch the file database at all — it points a fresh in-memory connection at the same `migrations/` directory and calls `knex.migrate.latest()` programmatically, so the demo always runs against the real schema without leaving files behind.
 
+</details>
+
+<details>
+<summary>
+
 ## Escape hatch: raw SQL
+
+</summary>
 
 Every layer here is designed so you're never actually stuck: `.whereRaw()` (above) handles the common case — an arbitrary condition mid-chain — but when a `Model` or `QueryChain` abstraction genuinely can't express what you need at all, drop to Knex directly. `getKnex()` returns the active connection (or the active transaction, if you're inside one — see [Transactions](#transactions)); `Model.query()` returns the same builder already scoped to that model's table:
 
@@ -917,7 +1031,14 @@ That last one is the case actually worth calling out: `knex.raw()`'s result shap
 
 This is deliberately not hidden or discouraged — Knex is a mature, fully public, actively maintained SQL builder (unlike Arel, which the Rails core team has said isn't a stable public API in modern Rails). There's no ceiling here: if `Model`/`QueryChain` can't do it, Knex almost certainly can, and it's one function call away.
 
+</details>
+
+<details>
+<summary>
+
 ## TypeScript typing notes
+
+</summary>
 
 A few deliberate choices shape how usable the types are for consumers:
 
@@ -935,6 +1056,8 @@ A few deliberate choices shape how usable the types are for consumers:
   }
   ```
 - **Polymorphic `this: T` typing throughout the static API** (`find`, `all`, `where`, `create`, `fromRow`, `preloadHasMany`, ...) means `User.find(1)` already resolves to `Promise<User | undefined>`, not `Promise<Model | undefined>` — this was correct from early on and didn't need changing.
+
+</details>
 
 ## Testing
 
