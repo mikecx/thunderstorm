@@ -112,7 +112,7 @@ export class Model extends AttributeModel {
   }
 
   static where<T extends typeof Model>(this: T, conditions: Partial<AttributesOf<InstanceType<T>>>): QueryChain<T> {
-    return new QueryChain(this, this.query().where(conditions as Record<string, any>));
+    return new QueryChain(this, this.query().where(castConditions(this, conditions as Record<string, any>)));
   }
 
   /**
@@ -289,9 +289,8 @@ export class Model extends AttributeModel {
   }
 
   /** Applies the column's save-cast (if any), converting a JS attribute value to its raw DB representation. */
-  private castForWrite(name: string, value: any): any {
-    const ctor = this.constructor as typeof Model;
-    const type = ctor.columns.get(name)?.type;
+  static castForWrite(name: string, value: any): any {
+    const type = this.columns.get(name)?.type;
     return type && value != null ? resolveCaster(type).save(value) : value;
   }
 
@@ -301,7 +300,7 @@ export class Model extends AttributeModel {
     for (const [name, options] of ctor.columns) {
       if (options.virtual) continue;
       const value = getAttr(this, name);
-      if (value !== undefined) attrs[name] = this.castForWrite(name, value);
+      if (value !== undefined) attrs[name] = ctor.castForWrite(name, value);
     }
     return attrs;
   }
@@ -323,11 +322,11 @@ export class Model extends AttributeModel {
         const value = getAttr(this, attribute);
         if (value === undefined || value === null || value === '') continue;
 
-        let qb = ctor.query().where(attribute, this.castForWrite(attribute, value));
+        let qb = ctor.query().where(attribute, ctor.castForWrite(attribute, value));
         if (typeof rule.uniqueness === 'object' && rule.uniqueness.scope) {
           const scopes = Array.isArray(rule.uniqueness.scope) ? rule.uniqueness.scope : [rule.uniqueness.scope];
           for (const scopeAttr of scopes) {
-            qb = qb.where(scopeAttr, this.castForWrite(scopeAttr, getAttr(this, scopeAttr)));
+            qb = qb.where(scopeAttr, ctor.castForWrite(scopeAttr, getAttr(this, scopeAttr)));
           }
         }
         if (this[PERSISTED]) {
@@ -385,7 +384,7 @@ export class Model extends AttributeModel {
       const updateAttrs: Record<string, any> = {};
       for (const [key, [, newValue]] of Object.entries(pendingChanges)) {
         if (key === pk || ctor.columns.get(key)?.virtual) continue;
-        updateAttrs[key] = this.castForWrite(key, newValue);
+        updateAttrs[key] = ctor.castForWrite(key, newValue);
       }
       if (Object.keys(updateAttrs).length > 0) {
         await ctor.query().where(pk, getAttr(this, pk)).update(updateAttrs);
@@ -452,6 +451,23 @@ export class Model extends AttributeModel {
 }
 
 /**
+ * Applies each condition value's column cast before it reaches Knex — shared
+ * by `Model.where()` and `QueryChain.where()` so a caster-backed column (a
+ * `json` column, a deterministic `encryptedCaster`, any custom `Caster`)
+ * matches on its raw DB representation instead of the JS value. Without
+ * this, `where({ metadata: {...} })` against a `json` column, or `where({
+ * ssn: '...' })` against a deterministically-encrypted one, would silently
+ * never match anything.
+ */
+function castConditions(ctor: typeof Model, conditions: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [key, value] of Object.entries(conditions)) {
+    result[key] = ctor.castForWrite(key, value);
+  }
+  return result;
+}
+
+/**
  * Thin lazy wrapper around a Knex query builder so `.where().order().limit()`
  * chains stay ActiveRecord-shaped and only hit the DB once awaited.
  */
@@ -462,7 +478,7 @@ export class QueryChain<T extends typeof Model> implements PromiseLike<InstanceT
   ) {}
 
   where(conditions: Partial<AttributesOf<InstanceType<T>>>): this {
-    this.qb = this.qb.where(conditions as Record<string, any>);
+    this.qb = this.qb.where(castConditions(this.modelClass, conditions as Record<string, any>));
     return this;
   }
 
