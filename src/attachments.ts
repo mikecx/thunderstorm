@@ -71,7 +71,7 @@ export function HasOneAttached(name: string, storage: BlobStorage, options: Atta
     columns.set(byteSizeProp, { guarded: true });
 
     Object.defineProperty(target.prototype, attachedProp, {
-      get(this: any) {
+      get(this: Model) {
         return getAttr(this, keyProp) != null;
       },
       enumerable: true,
@@ -82,7 +82,7 @@ export function HasOneAttached(name: string, storage: BlobStorage, options: Atta
       const key = generateKey(meta.filename);
       await storage.put(key, data, meta.contentType);
 
-      const previousKey = getAttr(this as any, keyProp);
+      const previousKey = getAttr(this, keyProp);
       try {
         await this.updateOrFail({
           [keyProp]: key,
@@ -101,7 +101,7 @@ export function HasOneAttached(name: string, storage: BlobStorage, options: Atta
     };
 
     target.prototype[purgeMethod] = async function (this: Model): Promise<void> {
-      const key = getAttr(this as any, keyProp);
+      const key = getAttr(this, keyProp);
       if (!key) return;
       await this.updateOrFail({
         [keyProp]: null,
@@ -113,7 +113,7 @@ export function HasOneAttached(name: string, storage: BlobStorage, options: Atta
     };
 
     target.prototype[purgeOnDestroyMethod] = async function (this: Model): Promise<void> {
-      const key = getAttr(this as any, keyProp);
+      const key = getAttr(this, keyProp);
       if (key) await storage.delete(key);
     };
     ownCallbackList(context.metadata, 'afterDestroy').push(purgeOnDestroyMethod);
@@ -143,7 +143,7 @@ export function HasManyAttached(
 
   return function (target: any, context: ClassDecoratorContext): void {
     target.prototype[name] = function (this: Model) {
-      return (this as any).hasMany(AttachmentModel, associationOptions);
+      return this.hasMany(AttachmentModel, associationOptions);
     };
 
     target.prototype[attachMethod] = async function (this: Model, data: Buffer, meta: AttachmentInput) {
@@ -152,8 +152,8 @@ export function HasManyAttached(
 
       const localKey = associationOptions.localKey ?? (this.constructor as typeof Model).primaryKey;
       try {
-        return await (AttachmentModel as any).create({
-          [associationOptions.foreignKey]: getAttr(this as any, localKey),
+        return await AttachmentModel.create({
+          [associationOptions.foreignKey]: getAttr(this, localKey),
           key,
           filename: meta.filename,
           contentType: meta.contentType,
@@ -168,7 +168,7 @@ export function HasManyAttached(
     const purgeAll = async function (this: Model): Promise<void> {
       const attached: InstanceType<typeof AttachmentModel>[] = await (this as any)[name]();
       for (const record of attached) {
-        await storage.delete((record as any).key);
+        await storage.delete(getAttr(record, 'key'));
         await record.destroy();
       }
     };
