@@ -11,7 +11,7 @@ describe('Column / PrimaryKey', () => {
       name!: string;
     }
 
-    const columns: Map<string, any> = (Widget as any)[COLUMNS];
+    const columns: Map<string, any> = (Widget as any)[Symbol.metadata][COLUMNS];
     expect(columns.get('id')).toEqual({ primary: true });
     expect(columns.get('name')).toEqual({});
   });
@@ -26,8 +26,8 @@ describe('Column / PrimaryKey', () => {
       bar!: string;
     }
 
-    expect((A as any)[COLUMNS].has('bar')).toBe(false);
-    expect((B as any)[COLUMNS].has('foo')).toBe(false);
+    expect((A as any)[Symbol.metadata][COLUMNS].has('bar')).toBe(false);
+    expect((B as any)[Symbol.metadata][COLUMNS].has('foo')).toBe(false);
   });
 
   it('gives a subclass its own column map rather than inheriting the parent instance', () => {
@@ -40,9 +40,9 @@ describe('Column / PrimaryKey', () => {
       extra!: string;
     }
 
-    expect((Sub as any)[COLUMNS]).not.toBe((Base as any)[COLUMNS]);
-    expect((Sub as any)[COLUMNS].has('extra')).toBe(true);
-    expect((Base as any)[COLUMNS].has('extra')).toBe(false);
+    expect((Sub as any)[Symbol.metadata][COLUMNS]).not.toBe((Base as any)[Symbol.metadata][COLUMNS]);
+    expect((Sub as any)[Symbol.metadata][COLUMNS].has('extra')).toBe(true);
+    expect((Base as any)[Symbol.metadata][COLUMNS].has('extra')).toBe(false);
   });
 });
 
@@ -54,7 +54,7 @@ describe('Validates', () => {
       name!: string;
     }
 
-    const rules: Map<string, any[]> = (Widget as any)[VALIDATIONS];
+    const rules: Map<string, any[]> = (Widget as any)[Symbol.metadata][VALIDATIONS];
     expect(rules.get('name')).toHaveLength(2);
   });
 });

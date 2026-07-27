@@ -91,10 +91,10 @@ class Order extends Model {
   @Column({ type: 'json' })
   metadata!: Record<string, any>;
 
-  // Custom setter normalizing every write. Backing field has NO initializer —
-  // one is needed here (see README) so it doesn't get reset after super() runs.
+  // Custom setter normalizing every write. Backing field is `declare`d, not a
+  // real field declaration — see README's "Custom accessors/setters" for why.
   // @Column() goes on the first of the get/set pair (TS requires exactly one).
-  private _code!: string;
+  declare private _code: string;
 
   @Column()
   get code(): string {

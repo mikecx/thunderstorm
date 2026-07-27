@@ -2,6 +2,13 @@ import type { Caster, ColumnType } from './casters';
 import type { Model } from './Model';
 import { generateToken, hashPassword, verifyPassword } from './security';
 
+// Node has no native `Symbol.metadata` yet, and TypeScript's decorator
+// helpers silently no-op `context.metadata` without it (see __esDecorate in
+// the compiled output) — this polyfill must run before any decorated class
+// is evaluated, so it lives at the top of the one module every decorator is
+// imported from.
+(Symbol as unknown as { metadata: symbol }).metadata ??= Symbol.for('Symbol.metadata');
+
 export interface ColumnOptions {
   primary?: boolean;
   /** Converts between the raw DB value and the JS attribute value on load/save. See src/casters.ts. */
@@ -31,17 +38,43 @@ export interface ColumnOptions {
 
 export const COLUMNS = Symbol('columns');
 
+type FieldOrAccessorContext = ClassFieldDecoratorContext | ClassGetterDecoratorContext | ClassSetterDecoratorContext;
+
 /**
- * Marks a class field as a mapped database column. Metadata is stored per-
- * constructor (not inherited) so each Model subclass owns its own column set.
+ * Fields need one extra step accessors don't: TypeScript always emits an
+ * unconditional `this.field = <initializer result>` right after `super()`
+ * for any decorated field, even when the decorator itself has nothing to
+ * contribute — which would silently stomp whatever `Object.assign(this,
+ * attrs)` (in AttributeModel's constructor, which runs first) had already
+ * set. Returning this from a field-kind decorator re-affirms whatever value
+ * is already on the instance by the time it runs (set by `Object.assign` or
+ * by AttributeModel's default-application loop, both of which complete
+ * before any subclass's own field initializers do) instead of discarding
+ * it. Getter/setter-kind decorations never trigger that reassignment, so
+ * they don't need this.
  */
-export function Column(options: ColumnOptions = {}): PropertyDecorator {
-  return (target, propertyKey) => {
-    ownColumns(target.constructor).set(propertyKey as string, options);
+function preserveFieldValue(context: FieldOrAccessorContext): ((this: any) => any) | void {
+  if (context.kind !== 'field') return undefined;
+  const name = context.name as string;
+  return function (this: any) {
+    return this[name];
   };
 }
 
-export function PrimaryKey(): PropertyDecorator {
+/**
+ * Marks a class field (or a getter/setter pair — decorate only the getter,
+ * see README's "Custom accessors/setters") as a mapped database column.
+ * Metadata is stored per-constructor (not inherited) so each Model subclass
+ * owns its own column set.
+ */
+export function Column(options: ColumnOptions = {}) {
+  return function (_value: any, context: FieldOrAccessorContext) {
+    ownColumns(context.metadata).set(context.name as string, options);
+    return preserveFieldValue(context);
+  };
+}
+
+export function PrimaryKey() {
   return Column({ primary: true });
 }
 
@@ -74,13 +107,16 @@ export interface ValidationRule {
 export const VALIDATIONS = Symbol('validations');
 
 /**
- * Declares a validation rule for an attribute. Stacks: applying @Validates
- * more than once on the same field (or to different fields) accumulates
- * rules, mirroring Rails' repeated `validates :attr, ...` calls.
+ * Declares a validation rule for an attribute — a plain field, or one not
+ * backed by a `@Column()` at all (an `AttributeModel` field that's checked
+ * but never persisted). Stacks: applying @Validates more than once on the
+ * same field (or to different fields) accumulates rules, mirroring Rails'
+ * repeated `validates :attr, ...` calls.
  */
-export function Validates(rule: ValidationRule): PropertyDecorator {
-  return (target, propertyKey) => {
-    ownValidationList(target.constructor, propertyKey as string).push(rule);
+export function Validates(rule: ValidationRule) {
+  return function (_value: any, context: FieldOrAccessorContext) {
+    ownValidationList(context.metadata, context.name as string).push(rule);
+    return preserveFieldValue(context);
   };
 }
 
@@ -101,62 +137,89 @@ export const CALLBACKS = Symbol('callbacks');
  * lifecycle. A before* callback that returns (or resolves to) `false` halts
  * the operation, mirroring Rails' `throw :abort` convention.
  */
-function registerCallback(type: CallbackType): MethodDecorator {
-  return (target, propertyKey) => {
-    ownCallbackList(target.constructor, type).push(propertyKey as string);
+function registerCallback(type: CallbackType) {
+  return function (_value: (...args: any[]) => any, context: ClassMethodDecoratorContext): void {
+    ownCallbackList(context.metadata, type).push(context.name as string);
   };
 }
 
-export const BeforeSave = (): MethodDecorator => registerCallback('beforeSave');
-export const AfterSave = (): MethodDecorator => registerCallback('afterSave');
-export const BeforeCreate = (): MethodDecorator => registerCallback('beforeCreate');
-export const AfterCreate = (): MethodDecorator => registerCallback('afterCreate');
-export const BeforeUpdate = (): MethodDecorator => registerCallback('beforeUpdate');
-export const AfterUpdate = (): MethodDecorator => registerCallback('afterUpdate');
-export const BeforeDestroy = (): MethodDecorator => registerCallback('beforeDestroy');
-export const AfterDestroy = (): MethodDecorator => registerCallback('afterDestroy');
+export const BeforeSave = () => registerCallback('beforeSave');
+export const AfterSave = () => registerCallback('afterSave');
+export const BeforeCreate = () => registerCallback('beforeCreate');
+export const AfterCreate = () => registerCallback('afterCreate');
+export const BeforeUpdate = () => registerCallback('beforeUpdate');
+export const AfterUpdate = () => registerCallback('afterUpdate');
+export const BeforeDestroy = () => registerCallback('beforeDestroy');
+export const AfterDestroy = () => registerCallback('afterDestroy');
 
 function capitalize(word: string): string {
   return word.length === 0 ? word : word[0].toUpperCase() + word.slice(1);
 }
 
 /**
- * Returns `ctor`'s own metadata map for `symbolKey`, creating one on first
- * use. When `ctor` doesn't have its own map yet but an ancestor does (e.g. a
- * `Timestamped(Model)` mixin registering columns/callbacks, then a further
- * subclass adding its own `@Column()`), the new map is seeded with cloned
- * copies of the inherited entries — a shallow `Map` copy alone would share
- * the same array *values*, so a subclass's `.push()` would silently mutate
- * its ancestor's list too.
+ * Returns `metadata`'s own map for `symbolKey`, creating one on first use.
+ * `metadata` is a class's `[Symbol.metadata]` object — the engine parents a
+ * subclass's own metadata object to its ancestor's automatically (mirroring
+ * the prototype chain), so an ordinary property lookup already sees
+ * inherited entries. But when `metadata` doesn't own a map for `symbolKey`
+ * yet and an ancestor does (e.g. a `Timestamped(Model)` mixin registering
+ * columns/callbacks, then a further subclass adding its own `@Column()`),
+ * the new map is seeded with cloned copies of the inherited entries — a
+ * shallow `Map` copy alone would share the same array *values*, so a
+ * subclass's `.push()` would silently mutate its ancestor's list too.
  */
-function ownMetadataMap<K, V>(ctor: any, symbolKey: symbol, cloneValue: (v: V) => V): Map<K, V> {
-  if (!Object.prototype.hasOwnProperty.call(ctor, symbolKey)) {
-    const inherited: Map<K, V> | undefined = ctor[symbolKey];
+function ownMetadataMap<K, V>(metadata: DecoratorMetadata, symbolKey: symbol, cloneValue: (v: V) => V): Map<K, V> {
+  if (!Object.prototype.hasOwnProperty.call(metadata, symbolKey)) {
+    const inherited: Map<K, V> | undefined = (metadata as any)[symbolKey];
     const fresh = new Map<K, V>();
     if (inherited) {
       for (const [key, value] of inherited) fresh.set(key, cloneValue(value));
     }
-    ctor[symbolKey] = fresh;
+    (metadata as any)[symbolKey] = fresh;
   }
-  return ctor[symbolKey];
+  return (metadata as any)[symbolKey];
 }
 
-function ownCallbackList(ctor: any, type: CallbackType): string[] {
-  const map = ownMetadataMap<CallbackType, string[]>(ctor, CALLBACKS, (methods) => [...methods]);
+function ownCallbackList(metadata: DecoratorMetadata, type: CallbackType): string[] {
+  const map = ownMetadataMap<CallbackType, string[]>(metadata, CALLBACKS, (methods) => [...methods]);
   const list = map.get(type) ?? [];
   map.set(type, list);
   return list;
 }
 
-function ownColumns(ctor: any): Map<string, ColumnOptions> {
-  return ownMetadataMap<string, ColumnOptions>(ctor, COLUMNS, (options) => ({ ...options }));
+function ownColumns(metadata: DecoratorMetadata): Map<string, ColumnOptions> {
+  return ownMetadataMap<string, ColumnOptions>(metadata, COLUMNS, (options) => ({ ...options }));
 }
 
-function ownValidationList(ctor: any, attribute: string): ValidationRule[] {
-  const map = ownMetadataMap<string, ValidationRule[]>(ctor, VALIDATIONS, (rules) => [...rules]);
+function ownValidationList(metadata: DecoratorMetadata, attribute: string): ValidationRule[] {
+  const map = ownMetadataMap<string, ValidationRule[]>(metadata, VALIDATIONS, (rules) => [...rules]);
   const list = map.get(attribute) ?? [];
   map.set(attribute, list);
   return list;
+}
+
+/**
+ * Mixins (`Timestamped`/`SecurePassword`/`SecureToken` below) register
+ * columns/callbacks imperatively rather than through an actual `@`-applied
+ * decorator, so there's no `context.metadata` handed to them — the engine
+ * only creates `[Symbol.metadata]` for classes that have at least one real
+ * decorator application. This synthesizes the same thing by hand: a fresh
+ * metadata object parented to whatever the superclass already has (falling
+ * back to `null`, exactly like the engine does for a class with no
+ * decorated superclass), stored the same way TypeScript's own decorator
+ * helper stores it.
+ */
+function ownClassMetadata(ctor: new (...args: any[]) => any): DecoratorMetadata {
+  if (!Object.prototype.hasOwnProperty.call(ctor, Symbol.metadata)) {
+    const parent = ((Object.getPrototypeOf(ctor) as any)?.[Symbol.metadata] ?? null) as DecoratorMetadata | null;
+    Object.defineProperty(ctor, Symbol.metadata, {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: Object.create(parent),
+    });
+  }
+  return (ctor as any)[Symbol.metadata];
 }
 
 /**
@@ -170,8 +233,8 @@ function ownValidationList(ctor: any, attribute: string): ValidationRule[] {
  * checker on its own — declare it via interface merging if you want it typed:
  * `interface Post { authorName(): Promise<string | undefined>; }`
  */
-export function Delegate(attributes: string[], options: { to: string }): ClassDecorator {
-  return (target: any) => {
+export function Delegate(attributes: string[], options: { to: string }) {
+  return function (target: any, _context: ClassDecoratorContext): void {
     for (const attribute of attributes) {
       const methodName = `${options.to}${capitalize(attribute)}`;
       target.prototype[methodName] = async function (this: any) {
@@ -201,7 +264,8 @@ export function Timestamped<TBase extends ModelConstructor>(
     updatedAt!: Date;
   }
 
-  const columns = ownColumns(WithTimestamps);
+  const metadata = ownClassMetadata(WithTimestamps);
+  const columns = ownColumns(metadata);
   columns.set('createdAt', { type: 'date' });
   columns.set('updatedAt', { type: 'date' });
 
@@ -214,8 +278,8 @@ export function Timestamped<TBase extends ModelConstructor>(
     this.updatedAt = new Date();
   };
 
-  ownCallbackList(WithTimestamps, 'beforeCreate').push('__stampCreatedAt');
-  ownCallbackList(WithTimestamps, 'beforeUpdate').push('__stampUpdatedAt');
+  ownCallbackList(metadata, 'beforeCreate').push('__stampCreatedAt');
+  ownCallbackList(metadata, 'beforeUpdate').push('__stampUpdatedAt');
 
   return WithTimestamps;
 }
@@ -257,7 +321,8 @@ export function SecurePassword<TBase extends ModelConstructor>(
     }
   }
 
-  const columns = ownColumns(WithSecurePassword);
+  const metadata = ownClassMetadata(WithSecurePassword);
+  const columns = ownColumns(metadata);
   columns.set('passwordDigest', { guarded: true });
   columns.set('password', { virtual: true });
   columns.set('passwordConfirmation', { virtual: true });
@@ -285,7 +350,7 @@ export function SecurePassword<TBase extends ModelConstructor>(
     this.passwordDigest = await hashPassword(this.password);
   };
 
-  ownCallbackList(WithSecurePassword, 'beforeSave').push('__handlePassword');
+  ownCallbackList(metadata, 'beforeSave').push('__handlePassword');
 
   return WithSecurePassword;
 }
@@ -307,12 +372,13 @@ export function SecureToken<TBase extends ModelConstructor>(
     }
   }
 
-  ownColumns(WithSecureToken).set('token', { guarded: true });
+  const metadata = ownClassMetadata(WithSecureToken);
+  ownColumns(metadata).set('token', { guarded: true });
 
   (WithSecureToken.prototype as any).__generateToken = function (this: any) {
     if (!this.token) this.token = generateToken();
   };
-  ownCallbackList(WithSecureToken, 'beforeCreate').push('__generateToken');
+  ownCallbackList(metadata, 'beforeCreate').push('__generateToken');
 
   return WithSecureToken;
 }
@@ -328,8 +394,8 @@ export function SecureToken<TBase extends ModelConstructor>(
  * As with @Delegate, the generated members aren't visible to the type
  * checker without a companion interface declaration.
  */
-export function Enum(attribute: string, values: Record<string, number | string>): ClassDecorator {
-  return (target: any) => {
+export function Enum(attribute: string, values: Record<string, number | string>) {
+  return function (target: any, _context: ClassDecoratorContext): void {
     const rawToLabel = new Map(Object.entries(values).map(([label, raw]) => [raw, label]));
 
     Object.defineProperty(target.prototype, `${attribute}Label`, {
