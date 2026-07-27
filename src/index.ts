@@ -24,3 +24,5 @@ export { Errors, RecordInvalid, RecordNotSaved } from './errors';
 export type { Caster, ColumnType } from './casters';
 export { CASTERS, resolveCaster } from './casters';
 export { hashPassword, verifyPassword, generateToken } from './security';
+export { HasOneAttached, HasManyAttached, attachmentColumns, createAttachmentTable } from './attachments';
+export type { BlobStorage, AttachmentInput } from './attachments';
