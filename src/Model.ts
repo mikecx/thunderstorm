@@ -290,6 +290,51 @@ export class Model extends AttributeModel {
   }
 
   /**
+   * The "commentable" side of a polymorphic association: `idField`/`typeField`
+   * on this record identify a row in one of several possible tables.
+   * `types` maps each `typeField` value to the `Model` it corresponds to —
+   * deliberately explicit rather than inferring a class name (`ctor.name`)
+   * the way Rails defaults to, so renaming a model class can never silently
+   * orphan every row that already references it under the old name.
+   */
+  protected belongsToPolymorphic<TTypes extends Record<string, typeof Model>>(
+    options: { idField: string; typeField: string },
+    types: TTypes
+  ): Promise<InstanceType<TTypes[keyof TTypes]> | undefined> {
+    const type = getAttr(this, options.typeField);
+    const id = getAttr(this, options.idField);
+    const target = types[type];
+    if (!target || id == null) return Promise.resolve(undefined);
+    return target.find(id) as Promise<InstanceType<TTypes[keyof TTypes]> | undefined>;
+  }
+
+  /**
+   * The reverse, "has many as" side of a polymorphic association — e.g. a
+   * `Post`'s comments, where `Comment.commentableType` must also match
+   * `typeValue` (the same stable string passed to `belongsToPolymorphic`'s
+   * `types` map on the `Comment` side) so a comment on a `Photo` with the
+   * same id never leaks in.
+   */
+  protected hasManyPolymorphic<T extends typeof Model>(
+    target: T,
+    options: { idField: string; typeField: string; typeValue: string; localKey?: string }
+  ): QueryChain<T> {
+    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+    return target.where({
+      [options.idField]: getAttr(this, localKey),
+      [options.typeField]: options.typeValue,
+    } as Partial<AttributesOf<InstanceType<T>>>);
+  }
+
+  /** One-to-one flavor of `hasManyPolymorphic` — same filter, first match only. */
+  protected hasOnePolymorphic<T extends typeof Model>(
+    target: T,
+    options: { idField: string; typeField: string; typeValue: string; localKey?: string }
+  ): Promise<InstanceType<T> | undefined> {
+    return this.hasManyPolymorphic(target, options).first();
+  }
+
+  /**
    * Batch-loads a hasMany association for a whole result set in one query
    * (`WHERE foreignKey IN (...)`) instead of one query per record, and
    * attaches the grouped results onto each record under `options.as`.
@@ -373,6 +418,72 @@ export class Model extends AttributeModel {
     const localIds = [...new Set(records.map((r) => getAttr(r, localKey)))];
     const joinRows = await getKnex()(options.joinTable).whereIn(options.sourceKey, localIds);
     await groupAndAttachThrough(records, target, joinRows, options.sourceKey, options.targetKey, localKey, options.as);
+  }
+
+  /** Batch-loads a `hasManyPolymorphic` association — same shape as `preloadHasMany`, plus the type filter. */
+  static async preloadHasManyPolymorphic<T extends typeof Model, R extends typeof Model>(
+    this: T,
+    records: InstanceType<T>[],
+    target: R,
+    options: { idField: string; typeField: string; typeValue: string; localKey?: string; as: string }
+  ): Promise<void> {
+    if (records.length === 0) return;
+    const localKey = options.localKey ?? this.primaryKey;
+    const ids = [...new Set(records.map((r) => getAttr(r, localKey)))];
+    const rows = await target.query().whereIn(options.idField, ids).where(options.typeField, options.typeValue);
+
+    const grouped = new Map<any, InstanceType<R>[]>();
+    for (const row of rows) {
+      const instance = target.fromRow(row);
+      const bucket = grouped.get(row[options.idField]) ?? [];
+      bucket.push(instance);
+      grouped.set(row[options.idField], bucket);
+    }
+    for (const record of records) {
+      setAttr(record, options.as, grouped.get(getAttr(record, localKey)) ?? []);
+    }
+  }
+
+  /**
+   * Batch-loads a `belongsToPolymorphic` association. Can't do this in one
+   * query the way `preloadBelongsTo` does, since different records may
+   * reference different target tables — instead groups `records` by their
+   * `typeField` value first, then runs one batched query per distinct type
+   * actually present. Still bounded (at most `types.size` queries, never one
+   * per record), just not always exactly one query the way the
+   * single-target preloads are.
+   */
+  static async preloadBelongsToPolymorphic<T extends typeof Model>(
+    this: T,
+    records: InstanceType<T>[],
+    options: { idField: string; typeField: string; types: Record<string, typeof Model>; as: string }
+  ): Promise<void> {
+    if (records.length === 0) return;
+
+    const recordsByType = new Map<string, InstanceType<T>[]>();
+    for (const record of records) {
+      const type = getAttr(record, options.typeField);
+      if (type == null) continue;
+      const bucket = recordsByType.get(type) ?? [];
+      bucket.push(record);
+      recordsByType.set(type, bucket);
+    }
+
+    for (const [type, recordsOfType] of recordsByType) {
+      const target = options.types[type];
+      if (!target) continue; // unrecognized type string — leave `as` unset for these records
+
+      const ids = [...new Set(recordsOfType.map((r) => getAttr(r, options.idField)).filter((v) => v != null))];
+      const rows = ids.length > 0 ? await target.query().whereIn(target.primaryKey, ids) : [];
+
+      const byId = new Map<any, InstanceType<typeof target>>();
+      for (const row of rows) {
+        byId.set(row[target.primaryKey], target.fromRow(row));
+      }
+      for (const record of recordsOfType) {
+        setAttr(record, options.as, byId.get(getAttr(record, options.idField)));
+      }
+    }
   }
 
   // --- lifecycle callbacks -------------------------------------------------
