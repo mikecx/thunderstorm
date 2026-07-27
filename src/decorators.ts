@@ -169,7 +169,7 @@ function capitalize(word: string): string {
  * subclass's `.push()` would silently mutate its ancestor's list too.
  */
 function ownMetadataMap<K, V>(metadata: DecoratorMetadata, symbolKey: symbol, cloneValue: (v: V) => V): Map<K, V> {
-  if (!Object.prototype.hasOwnProperty.call(metadata, symbolKey)) {
+  if (!Object.hasOwn(metadata, symbolKey)) {
     const inherited: Map<K, V> | undefined = (metadata as any)[symbolKey];
     const fresh = new Map<K, V>();
     if (inherited) {
@@ -210,7 +210,7 @@ function ownValidationList(metadata: DecoratorMetadata, attribute: string): Vali
  * helper stores it.
  */
 function ownClassMetadata(ctor: new (...args: any[]) => any): DecoratorMetadata {
-  if (!Object.prototype.hasOwnProperty.call(ctor, Symbol.metadata)) {
+  if (!Object.hasOwn(ctor, Symbol.metadata)) {
     const parent = ((Object.getPrototypeOf(ctor) as any)?.[Symbol.metadata] ?? null) as DecoratorMetadata | null;
     Object.defineProperty(ctor, Symbol.metadata, {
       enumerable: true,

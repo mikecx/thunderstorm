@@ -16,6 +16,8 @@ npm install @mikecx/thunderstorm knex
 
 `knex` is a peer dependency — bring your own version (3.x) plus whichever DB driver you need (`pg`, `sqlite3`, `mysql2`, ...). See [Connecting](#connecting) below.
 
+Requires **Node 22+**.
+
 `@Column()`/`@Validates()`/etc. are standard TC39 (Stage 3) decorators — the TypeScript 5+ default. Do **not** set `"experimentalDecorators": true` in your own `tsconfig.json`; that opts into the older, incompatible decorator model and these decorators won't work correctly under it. No other special `tsconfig.json` settings are required — plain defaults are fine.
 
 ## Contents
@@ -711,6 +713,6 @@ npm run build         # emit dist/ — excludes *.test.ts
 npm test
 ```
 
-All of the above run in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on push/PR against Node 20 and 22. `eslint.config.mjs` turns off `@typescript-eslint/no-explicit-any` (this codebase uses `any` deliberately as a controlled escape hatch — see [TypeScript typing notes](#typescript-typing-notes)) and `@typescript-eslint/no-unsafe-declaration-merging` (needed for the `@Delegate`/`@Enum` interface-merging typing pattern documented above).
+All of the above run in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on push/PR against Node 22 and 24 (the two currently-supported LTS lines — see `engines.node` in `package.json`). `eslint.config.mjs` turns off `@typescript-eslint/no-explicit-any` (this codebase uses `any` deliberately as a controlled escape hatch — see [TypeScript typing notes](#typescript-typing-notes)) and `@typescript-eslint/no-unsafe-declaration-merging` (needed for the `@Delegate`/`@Enum` interface-merging typing pattern documented above).
 
 See [AGENTS.md](AGENTS.md) for the internals-focused guide — architecture, load-bearing design decisions worth knowing before changing `Model.ts`/`decorators.ts`, and testing conventions. This README is the user-facing feature reference; AGENTS.md is about how the codebase is put together.
