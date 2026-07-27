@@ -180,14 +180,21 @@ function ownMetadataMap<K, V>(metadata: DecoratorMetadata, symbolKey: symbol, cl
   return (metadata as any)[symbolKey];
 }
 
-function ownCallbackList(metadata: DecoratorMetadata, type: CallbackType): string[] {
+/**
+ * Exported (unlike the rest of this metadata plumbing) so other in-package
+ * macros — currently `attachments.ts`'s `@HasOneAttached`/`@HasManyAttached`
+ * — can register real columns/callbacks the same way `@Column()`/callback
+ * decorators do, instead of hand-rolling their own metadata storage. Not part
+ * of the public API surface (not re-exported from index.ts).
+ */
+export function ownCallbackList(metadata: DecoratorMetadata, type: CallbackType): string[] {
   const map = ownMetadataMap<CallbackType, string[]>(metadata, CALLBACKS, (methods) => [...methods]);
   const list = map.get(type) ?? [];
   map.set(type, list);
   return list;
 }
 
-function ownColumns(metadata: DecoratorMetadata): Map<string, ColumnOptions> {
+export function ownColumns(metadata: DecoratorMetadata): Map<string, ColumnOptions> {
   return ownMetadataMap<string, ColumnOptions>(metadata, COLUMNS, (options) => ({ ...options }));
 }
 

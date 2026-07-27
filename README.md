@@ -45,6 +45,7 @@ Requires **Node 22+**.
 - [Enums](#enums)
 - [SecurePassword](#securepassword)
 - [SecureToken](#securetoken)
+- [File attachments](#file-attachments)
 - [Transactions](#transactions)
 - [Migrations](#migrations)
 - [Escape hatch: raw SQL](#escape-hatch-raw-sql)
@@ -577,6 +578,132 @@ await key.regenerateToken(); // replaces and persists a new token
 
 `token` is `guarded`, same reasoning as `passwordDigest` — it's server-generated, never something that should arrive via mass-assigned input or leak into a default API response.
 
+## File attachments
+
+Attach files to a record without thunderstorm ever touching the actual bytes: it persists blob metadata (key, filename, content type, byte size) and orchestrates two functions you provide — `put`/`delete` — so key generation and storage cleanup are guaranteed, not opt-in caller discipline.
+
+```ts
+export interface BlobStorage {
+  put(key: string, data: Buffer, contentType: string): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+```
+
+`BlobStorage` is deliberately not a full "storage service" — no `get`, no `url`, no variants. Serving a file back out (signed URLs, a CDN path, a static file route) is a deployment-specific, controller-shaped concern that stays entirely yours; thunderstorm only guarantees the bytes get written when you attach and deleted when you purge/destroy.
+
+### `@HasOneAttached` — one file per record
+
+```ts
+import { Model, HasOneAttached, PrimaryKey, Column } from '@mikecx/thunderstorm';
+
+const avatarStorage: BlobStorage = {
+  put: (key, data, contentType) =>
+    s3
+      .send(new PutObjectCommand({ Bucket: 'my-bucket', Key: key, Body: data, ContentType: contentType }))
+      .then(() => {}),
+  delete: (key) => s3.send(new DeleteObjectCommand({ Bucket: 'my-bucket', Key: key })).then(() => {}),
+};
+
+@HasOneAttached('avatar', avatarStorage)
+class User extends Model {
+  static tableName = 'users';
+  @PrimaryKey() id!: number;
+  @Column() email!: string;
+}
+
+interface User {
+  avatarKey: string | null;
+  avatarFilename: string | null;
+  avatarContentType: string | null;
+  avatarByteSize: number | null;
+  readonly avatarAttached: boolean;
+  attachAvatar(data: Buffer, meta: { filename: string; contentType: string }): Promise<void>;
+  purgeAvatar(): Promise<void>;
+}
+
+await user.attachAvatar(req.file.buffer, { filename: req.file.originalname, contentType: req.file.mimetype });
+user.avatarAttached; // true
+await user.destroy(); // avatar's blob is deleted automatically — no manual purge() needed
+```
+
+`storage` is required, not optional — a model can't be decorated without a way to clean up after itself. Add the migration with `attachmentColumns()`, which keeps the column names in lockstep with what `@HasOneAttached` reads at runtime instead of hand-typed boilerplate that could drift:
+
+```ts
+import type { Knex } from 'knex';
+import { attachmentColumns } from '@mikecx/thunderstorm';
+
+export async function up(knex: Knex): Promise<void> {
+  await knex.schema.alterTable('users', (t) => attachmentColumns(t, 'avatar'));
+}
+export async function down(knex: Knex): Promise<void> {
+  await knex.schema.alterTable('users', (t) => {
+    t.dropColumn('avatarKey');
+    t.dropColumn('avatarFilename');
+    t.dropColumn('avatarContentType');
+    t.dropColumn('avatarByteSize');
+  });
+}
+```
+
+Like `@Delegate`/`@Enum`, the generated members (`avatarKey`, `attachAvatar`, ...) come from the runtime `'avatar'` string, so they're not visible to the type checker on their own — declare them via interface merging as shown above.
+
+### `@HasManyAttached` — multiple files per record
+
+Unlike Rails' polymorphic `active_storage_attachments`, this is a real, ordinary `@Column()`-backed table with a real foreign key — thunderstorm has no polymorphic associations, so each attachment point gets its own table, defined the same way any other model is:
+
+```ts
+class PostImage extends Model {
+  static tableName = 'postImages';
+  @PrimaryKey() id!: number;
+  @Column() postId!: number;
+  @Column() key!: string;
+  @Column() filename!: string;
+  @Column() contentType!: string;
+  @Column() byteSize!: number;
+}
+
+@HasManyAttached('images', PostImage, { foreignKey: 'postId' }, imageStorage)
+class Post extends Model {
+  static tableName = 'posts';
+  @PrimaryKey() id!: number;
+  @Column() title!: string;
+}
+
+interface Post {
+  images(): Promise<PostImage[]>;
+  attachImages(data: Buffer, meta: { filename: string; contentType: string }): Promise<PostImage>;
+  purgeImages(): Promise<void>;
+}
+
+const image = await post.attachImages(buffer, { filename: 'cover.png', contentType: 'image/png' });
+for (const image of await post.images()) {
+  /* ... */
+}
+await post.destroy(); // every attached image's blob is deleted automatically
+```
+
+`images()` is just `this.hasMany(PostImage, { foreignKey: 'postId' })` under the hood — only the storage orchestration is new, not the association. Member names are used exactly as given (no pluralization/singularization guessing) — `HasManyAttached('images', ...)` gives you `attachImages`/`purgeImages`, matching `@Enum`'s existing convention of deriving names directly from the literal string rather than guessing grammar.
+
+The table itself is created with `createAttachmentTable()`, same lockstep-with-the-decorator reasoning as `attachmentColumns()` above:
+
+```ts
+import { createAttachmentTable } from '@mikecx/thunderstorm';
+
+export async function up(knex: Knex): Promise<void> {
+  await createAttachmentTable(knex, 'postImages', { foreignKey: 'postId' });
+}
+export async function down(knex: Knex): Promise<void> {
+  await knex.schema.dropTable('postImages');
+}
+```
+
+### What this doesn't do
+
+- No image variants/thumbnails, no direct-upload tokens, no signed-URL helpers — bring your own (`sharp`, your storage SDK's presigner).
+- **Gotcha:** if `storage.put` succeeds but the following database write then fails (a validation error, a dropped connection), `attachAvatar`/`attachImages` best-effort calls `storage.delete` on the now-orphaned key — but a delete failure there won't mask the original save error, so a narrow leak window remains under storage flakiness at exactly the wrong moment.
+- Destroy-time cleanup is synchronous and best-effort, not transactional: there's no job queue backing it, so a `storage.delete` failure during `destroy()` makes the whole call reject even though the database row is already gone — you'll see the error and know to retry cleanup, it won't silently leak.
+- Buffers only, no streaming — the whole file needs to be in memory to compute `byteSize`, unlike Rails' IO-stream-based blobs. Fine for avatars/typical uploads, not huge files.
+
 ## Transactions
 
 `transaction(fn)` runs `fn` inside a real database transaction. Every `Model` call made anywhere inside it — including in nested async calls — implicitly participates, with **no `trx` parameter to thread through anything**: it's backed by Node's `AsyncLocalStorage`, so `getKnex()` resolves to the active transaction automatically for the lifetime of that async context.
@@ -675,24 +802,25 @@ npm test          # run once
 npm run test:watch
 ```
 
-| File                                                     | Covers                                                                                                     |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                             |
-| [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                |
-| [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                   |
-| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, preload query counts                                                       |
-| [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                        |
-| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors                                           |
-| [src/macros.test.ts](src/macros.test.ts)                 | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on                       |
-| [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                 |
-| [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                             |
-| [src/convenience.test.ts](src/convenience.test.ts)       | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                                                     |
-| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination, `whereRaw` composability           |
-| [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                           |
-| [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface |
-| [src/permit.test.ts](src/permit.test.ts)                 | `permit()` — allowlist/guarded/primary-key filtering, the actual mass-assignment vulnerability it closes   |
-| [src/uniqueness.test.ts](src/uniqueness.test.ts)         | `@Validates({ uniqueness })` — self-exclusion on update, scoping, `RecordInvalid` vs `RecordNotSaved`      |
-| [src/security.test.ts](src/security.test.ts)             | `SecurePassword`/`SecureToken` mixins, and the `security.ts` hashing/token primitives directly             |
+| File                                                     | Covers                                                                                                                       |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                                               |
+| [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                                  |
+| [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                                     |
+| [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, preload query counts                                                                         |
+| [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                                          |
+| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors                                                             |
+| [src/macros.test.ts](src/macros.test.ts)                 | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on                                         |
+| [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                                   |
+| [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                                               |
+| [src/convenience.test.ts](src/convenience.test.ts)       | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                                                                       |
+| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination, `whereRaw` composability                             |
+| [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                                             |
+| [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface                   |
+| [src/permit.test.ts](src/permit.test.ts)                 | `permit()` — allowlist/guarded/primary-key filtering, the actual mass-assignment vulnerability it closes                     |
+| [src/uniqueness.test.ts](src/uniqueness.test.ts)         | `@Validates({ uniqueness })` — self-exclusion on update, scoping, `RecordInvalid` vs `RecordNotSaved`                        |
+| [src/security.test.ts](src/security.test.ts)             | `SecurePassword`/`SecureToken` mixins, and the `security.ts` hashing/token primitives directly                               |
+| [src/attachments.test.ts](src/attachments.test.ts)       | `@HasOneAttached`/`@HasManyAttached` — key generation, reattach/purge/destroy cleanup, orphaned-blob cleanup on save failure |
 
 They're the most precise documentation of edge cases — e.g. `associations.test.ts` asserts the exact query count `preloadHasMany` issues via `knex.on('query', ...)`, and `transactions.test.ts` asserts a partially-completed multi-step transfer fully rolls back on failure.
 
