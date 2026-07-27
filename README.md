@@ -37,6 +37,7 @@ Requires **Node 22+**.
 - [Avoiding N+1 queries](#avoiding-n1-queries)
 - [Dirty tracking](#dirty-tracking)
 - [Attribute casting/serialization](#attribute-castingserialization)
+- [Column encryption](#column-encryption)
 - [Virtual attributes and defaults](#virtual-attributes-and-defaults)
 - [Custom accessors/setters](#custom-accessorssetters)
 - [Delegate](#delegate)
@@ -417,6 +418,41 @@ For anything the built-ins don't cover, pass a custom caster instead of a type n
 @Column({ type: { load: (raw) => new Decimal(raw), save: (value) => value.toString() } })
 price!: Decimal;
 ```
+
+## Column encryption
+
+`encryptedCaster()` is exactly that kind of custom caster — there's no separate decorator for encryption, just `@Column({ type: encryptedCaster({ keys: [key] }) })`. AES-256-GCM via Node's built-in `crypto`, no external dependency:
+
+```ts
+import { encryptedCaster } from '@mikecx/thunderstorm';
+
+const key = Buffer.from(process.env.ENCRYPTION_KEY!, 'base64'); // exactly 32 bytes
+
+class Patient extends Model {
+  static tableName = 'patients';
+  @PrimaryKey() id!: number;
+
+  @Column({ type: encryptedCaster({ keys: [key] }) })
+  diagnosis!: string; // non-deterministic (default): safest, but not queryable at all
+
+  @Column({ type: encryptedCaster({ keys: [key], deterministic: true }) })
+  @Validates({ uniqueness: true })
+  ssn!: string; // deterministic: same plaintext -> same ciphertext, so where()/uniqueness still work
+}
+
+await Patient.where({ ssn: '111-11-1111' }); // matches — deterministic columns are queryable
+await Patient.where({ diagnosis: 'flu' }); // never matches — non-deterministic ciphertext differs every write
+```
+
+**Deterministic vs. non-deterministic** is the one real choice: deterministic encryption keeps a column queryable (`where()`, `@Validates({ uniqueness })`) because the same plaintext always produces the same ciphertext under a given key — at the cost of leaking equality: anyone who can read ciphertexts can tell which rows share a value, and on low-cardinality data (a small enumerable set of possible plaintexts) can guess values by comparing against ciphertexts they've computed themselves. Non-deterministic encryption (the default) uses a random IV per write, so identical plaintexts produce different ciphertext every time — safer, but genuinely unqueryable; there's no way to `where()` against it.
+
+**Key rotation**: `keys` is a list, tried in order on decrypt — put the new key first (used for all new writes) and keep old keys after it so existing rows still decrypt:
+
+```ts
+encryptedCaster({ keys: [newKey, oldKey] });
+```
+
+Rotation isn't automatic re-encryption, though — reading and re-saving the _same_ value won't rewrite it, since dirty tracking only sends columns whose JS-level value actually changed. Migrating existing rows off an old key needs to force the write (e.g. a script that reads, then writes back a value dirty tracking will actually notice as changed, or a raw `UPDATE`).
 
 ## Virtual attributes and defaults
 
@@ -809,7 +845,8 @@ npm run test:watch
 | [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                                     |
 | [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, preload query counts                                                                         |
 | [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                                          |
-| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors                                                             |
+| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors, `where()` casting condition values                         |
+| [src/encryption.test.ts](src/encryption.test.ts)         | `encryptedCaster()` — deterministic vs. non-deterministic, queryability, uniqueness, key rotation, wrong-key errors          |
 | [src/macros.test.ts](src/macros.test.ts)                 | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on                                         |
 | [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                                   |
 | [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                                               |

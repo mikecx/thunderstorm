@@ -107,6 +107,14 @@ describe('built-in casters round-trip through the database', () => {
     expect(reloaded!.metadata).toEqual({ color: 'red', tags: ['a', 'b'] });
   });
 
+  it('where() applies the column cast to condition values, not just save()', async () => {
+    await Widget.create({ name: 'Configured', metadata: { color: 'red' } });
+    await Widget.create({ name: 'Other', metadata: { color: 'blue' } });
+
+    const matches = await Widget.where({ metadata: { color: 'red' } as any });
+    expect(matches.map((w) => w.name)).toEqual(['Configured']);
+  });
+
   it('number: coerces on load even if the driver hands back a string-ish value', async () => {
     const widget = await Widget.create({ name: 'Counted', quantity: 5 });
     await knex('widgets')
