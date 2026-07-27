@@ -63,11 +63,11 @@ export class AttributeModel {
   // --- schema introspection -------------------------------------------
 
   static get columns(): Map<string, ColumnOptions> {
-    return (this as any)[COLUMNS] ?? new Map();
+    return (this as any)[Symbol.metadata]?.[COLUMNS] ?? new Map();
   }
 
   static get validations(): Map<string, ValidationRule[]> {
-    return (this as any)[VALIDATIONS] ?? new Map();
+    return (this as any)[Symbol.metadata]?.[VALIDATIONS] ?? new Map();
   }
 
   // --- mass-assignment protection -----------------------------------------

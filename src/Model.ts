@@ -54,7 +54,7 @@ export class Model extends AttributeModel {
   private [PERSISTED] = false;
 
   static callbacksFor(type: CallbackType): string[] {
-    return (this as any)[CALLBACKS]?.get(type) ?? [];
+    return (this as any)[Symbol.metadata]?.[CALLBACKS]?.get(type) ?? [];
   }
 
   static get primaryKey(): string {

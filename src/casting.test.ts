@@ -26,12 +26,15 @@ class Widget extends Model {
 
   // A custom setter normalizing every write; also runs when loading from the DB (see README caveat).
   //
-  // The backing field must NOT have an initializer: Model's constructor does
-  // Object.assign(this, attrs) via super(), which runs the setter below —
-  // but a subclass field initializer (e.g. `private _sku: string = '';`)
-  // executes *after* super() returns and would silently clobber that back
-  // to ''. No initializer (definite assignment assertion instead) avoids it.
-  private _sku!: string;
+  // The backing field must be `declare`d, not a real field declaration:
+  // TC39 decorators require standards-compliant class-fields semantics, so
+  // once any field in this class is decorated, *every* plain field
+  // declaration — even one with no initializer — gets an implicit
+  // `this._sku = undefined` inserted right after super() returns, clobbering
+  // whatever the setter (invoked by Object.assign in Model's constructor,
+  // via super()) had just written. `declare` tells TypeScript this property
+  // exists without emitting any field-initialization code for it at all.
+  declare private _sku: string;
 
   get sku(): string {
     return this._sku;

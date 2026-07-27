@@ -16,6 +16,8 @@ npm install @mikecx/thunderstorm knex
 
 `knex` is a peer dependency — bring your own version (3.x) plus whichever DB driver you need (`pg`, `sqlite3`, `mysql2`, ...). See [Connecting](#connecting) below.
 
+`@Column()`/`@Validates()`/etc. are standard TC39 (Stage 3) decorators — the TypeScript 5+ default. Do **not** set `"experimentalDecorators": true` in your own `tsconfig.json`; that opts into the older, incompatible decorator model and these decorators won't work correctly under it. No other special `tsconfig.json` settings are required — plain defaults are fine.
+
 ## Contents
 
 - [Installation](#installation)
@@ -437,8 +439,8 @@ class SignupForm extends Model {
 
 ```ts
 class Order extends Model {
-  // No initializer on the backing field — see the callout below.
-  private _code!: string;
+  // `declare`d, not a real field — see the callout below.
+  declare private _code: string;
 
   @Column()
   get code(): string {
@@ -452,7 +454,7 @@ class Order extends Model {
 new Order({ code: '  ab-123  ' }).code; // 'AB-123'
 ```
 
-**Gotcha:** the backing field must _not_ have an initializer (`private _code: string = '';`). `Model`'s constructor sets attributes via `Object.assign(this, attrs)` inside `super(...)`, which runs your setter — but a subclass field _with_ an initializer runs its own initializer **after** `super()` returns, silently resetting the backing field back to `''`. Declare it with a definite assignment assertion (`private _code!: string;`) instead, exactly like every plain `@Column()` field already does.
+**Gotcha:** the backing field must be declared with `declare` (`declare private _code: string;`), not as a real field — including with a definite assignment assertion (`private _code!: string;`). `Model`'s constructor sets attributes via `Object.assign(this, attrs)` inside `super(...)`, which runs your setter — but TC39 decorators require standards-compliant class-fields semantics, so once _any_ field in the class is decorated, every ordinary field declaration (even one with no initializer) gets an implicit `this._code = undefined` inserted right after `super()` returns, silently clobbering whatever the setter just wrote. `declare` tells TypeScript the property exists without emitting any field-initialization code for it, sidestepping the issue entirely.
 
 The setter also runs when loading a row from the database (there's no separate "internal write" path), so keep it idempotent — normalizing an already-normalized value should be a no-op.
 
