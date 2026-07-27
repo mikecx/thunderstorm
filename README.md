@@ -945,26 +945,26 @@ npm test          # run once
 npm run test:watch
 ```
 
-| File                                                     | Covers                                                                                                                       |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                                               |
-| [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                                  |
-| [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                                     |
+| File                                                     | Covers                                                                                                                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [src/Model.test.ts](src/Model.test.ts)                   | CRUD, querying                                                                                                                                                |
+| [src/validations.test.ts](src/validations.test.ts)       | `@Validates`, `errors`, `save`/`saveOrFail`                                                                                                                   |
+| [src/callbacks.test.ts](src/callbacks.test.ts)           | lifecycle hooks, halting                                                                                                                                      |
 | [src/associations.test.ts](src/associations.test.ts)     | `hasMany`/`hasOne`/`belongsTo`, `hasManyThrough`/`hasAndBelongsToMany`, `belongsToPolymorphic`/`hasManyPolymorphic`/`hasOnePolymorphic`, preload query counts |
-| [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                                          |
-| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors, `where()` casting condition values                         |
-| [src/encryption.test.ts](src/encryption.test.ts)         | `encryptedCaster()` — deterministic vs. non-deterministic, queryability, uniqueness, key rotation, wrong-key errors          |
-| [src/macros.test.ts](src/macros.test.ts)                 | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on                                         |
-| [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                                   |
-| [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                                               |
-| [src/convenience.test.ts](src/convenience.test.ts)       | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                                                                       |
-| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination, `whereRaw` composability                             |
-| [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                                             |
-| [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface                   |
-| [src/permit.test.ts](src/permit.test.ts)                 | `permit()` — allowlist/guarded/primary-key filtering, the actual mass-assignment vulnerability it closes                     |
-| [src/uniqueness.test.ts](src/uniqueness.test.ts)         | `@Validates({ uniqueness })` — self-exclusion on update, scoping, `RecordInvalid` vs `RecordNotSaved`                        |
-| [src/security.test.ts](src/security.test.ts)             | `SecurePassword`/`SecureToken` mixins, and the `security.ts` hashing/token primitives directly                               |
-| [src/attachments.test.ts](src/attachments.test.ts)       | `@HasOneAttached`/`@HasManyAttached` — key generation, reattach/purge/destroy cleanup, orphaned-blob cleanup on save failure |
+| [src/dirty.test.ts](src/dirty.test.ts)                   | `changes`/`isChanged`/`previousChanges`, partial writes, `reload()`                                                                                           |
+| [src/casting.test.ts](src/casting.test.ts)               | built-in casters round-tripping through the DB, custom accessors, `where()` casting condition values                                                          |
+| [src/encryption.test.ts](src/encryption.test.ts)         | `encryptedCaster()` — deterministic vs. non-deterministic, queryability, uniqueness, key rotation, wrong-key errors                                           |
+| [src/macros.test.ts](src/macros.test.ts)                 | `Timestamped`, `@Delegate`, `@Enum`, and the metadata-inheritance fix they depend on                                                                          |
+| [src/scopes.test.ts](src/scopes.test.ts)                 | static-method scopes, `QueryChain.apply()`                                                                                                                    |
+| [src/transactions.test.ts](src/transactions.test.ts)     | commit, rollback, nested reuse                                                                                                                                |
+| [src/convenience.test.ts](src/convenience.test.ts)       | `update`/`updateOrFail`/`firstOrCreate`/`dup`/`toJSON`                                                                                                        |
+| [src/queries.test.ts](src/queries.test.ts)               | `pluck`/`count`/`exists`, `findEach`/`findInBatches` cursor pagination, `whereRaw` composability                                                              |
+| [src/attributes.test.ts](src/attributes.test.ts)         | virtual attributes, defaults, `serializableHash`                                                                                                              |
+| [src/attributeModel.test.ts](src/attributeModel.test.ts) | `AttributeModel` used standalone — no `tableName`, no DB connection, none of `Model`'s persistence surface                                                    |
+| [src/permit.test.ts](src/permit.test.ts)                 | `permit()` — allowlist/guarded/primary-key filtering, the actual mass-assignment vulnerability it closes                                                      |
+| [src/uniqueness.test.ts](src/uniqueness.test.ts)         | `@Validates({ uniqueness })` — self-exclusion on update, scoping, `RecordInvalid` vs `RecordNotSaved`                                                         |
+| [src/security.test.ts](src/security.test.ts)             | `SecurePassword`/`SecureToken` mixins, and the `security.ts` hashing/token primitives directly                                                                |
+| [src/attachments.test.ts](src/attachments.test.ts)       | `@HasOneAttached`/`@HasManyAttached` — key generation, reattach/purge/destroy cleanup, orphaned-blob cleanup on save failure                                  |
 
 They're the most precise documentation of edge cases — e.g. `associations.test.ts` asserts the exact query count `preloadHasMany` issues via `knex.on('query', ...)`, and `transactions.test.ts` asserts a partially-completed multi-step transfer fully rolls back on failure.
 
