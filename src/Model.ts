@@ -55,6 +55,17 @@ const PERSISTED = Symbol('persisted');
 const LOCK_COLUMN = 'lockVersion';
 
 /**
+ * Soft delete is enabled by the same convention `Lockable` uses — a declared
+ * `deletedAt` column (see the `SoftDelete` mixin in decorators.ts) — rather
+ * than a decorator or opt-in flag. `destroy()` checks for this column
+ * directly and, when present, does an UPDATE setting it instead of a DELETE,
+ * while still running the usual beforeDestroy/afterDestroy callbacks around
+ * it. `SoftDelete` also registers a `@DefaultScope` excluding non-null rows,
+ * so a soft-deleted record is invisible to normal reads until `restore()`d.
+ */
+const SOFT_DELETE_COLUMN = 'deletedAt';
+
+/**
  * The ActiveRecord-equivalent layer: extends AttributeModel (attributes,
  * validations, dirty tracking, serialization — see AttributeModel.ts) with
  * persistence, querying, associations, and lifecycle callbacks.
@@ -727,7 +738,10 @@ export class Model extends AttributeModel {
    * Returns false — without deleting — if a beforeDestroy callback aborts
    * the chain. Throws StaleObjectError (not a normal false return) if the
    * record is optimistically locked and someone else already changed or
-   * deleted it — see `Lockable`/`save()`.
+   * deleted it — see `Lockable`/`save()`. On a `SoftDelete`-mixed-in model,
+   * this sets `deletedAt` via an UPDATE instead of issuing a DELETE — the
+   * row still physically exists, so `isPersisted` stays `true` and a
+   * subsequent `save()` still does an UPDATE, not a re-INSERT.
    */
   async destroy(): Promise<boolean> {
     if (!(await this.runCallbacks('beforeDestroy'))) return false;
@@ -738,13 +752,56 @@ export class Model extends AttributeModel {
     const isLockable = ctor.columns.has(LOCK_COLUMN);
     if (isLockable) qb = qb.where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, getAttr(this, LOCK_COLUMN)));
 
-    const affected = await qb.delete();
-    if (isLockable && affected === 0) throw new StaleObjectError(this);
-
-    this[PERSISTED] = false;
+    const isSoftDeletable = ctor.columns.has(SOFT_DELETE_COLUMN);
+    let affected: number;
+    if (isSoftDeletable) {
+      const deletedAt = new Date();
+      affected = await qb.update({ [SOFT_DELETE_COLUMN]: ctor.castForWrite(SOFT_DELETE_COLUMN, deletedAt) });
+      if (isLockable && affected === 0) throw new StaleObjectError(this);
+      if (affected > 0) {
+        setAttr(this, SOFT_DELETE_COLUMN, deletedAt);
+        this.snapshotAttributes();
+      }
+    } else {
+      affected = await qb.delete();
+      if (isLockable && affected === 0) throw new StaleObjectError(this);
+      this[PERSISTED] = false;
+    }
 
     await this.runCallbacks('afterDestroy');
     return true;
+  }
+
+  /**
+   * Un-soft-deletes this record by clearing `deletedAt`, the inverse of a
+   * `SoftDelete`-aware `destroy()`. Throws if the model has no `deletedAt`
+   * column — there's nothing to restore. Targets this record directly by
+   * primary key like `destroy()` does, so it works on an instance loaded via
+   * `Model.unscoped()` (a plain `find()`/`all()`/`where()` won't surface a
+   * soft-deleted row in the first place, since `SoftDelete` registers a
+   * `@DefaultScope` excluding it). Doesn't run callbacks or go through the
+   * `Lockable` check — same documented simplification `insertAll()`/
+   * `deleteAll()` already make elsewhere in this library.
+   */
+  async restore(): Promise<boolean> {
+    const ctor = this.constructor as typeof Model;
+    if (!ctor.columns.has(SOFT_DELETE_COLUMN)) {
+      throw new Error(`${ctor.name} is not soft-deletable (no ${SOFT_DELETE_COLUMN} column).`);
+    }
+    const pk = ctor.primaryKey;
+    await ctor
+      .query()
+      .where(pk, getAttr(this, pk))
+      .update({ [SOFT_DELETE_COLUMN]: null });
+    setAttr(this, SOFT_DELETE_COLUMN, undefined);
+    this.snapshotAttributes();
+    return true;
+  }
+
+  /** Whether this record is soft-deleted. Always false on a model without a `deletedAt` column. */
+  get isDeleted(): boolean {
+    const ctor = this.constructor as typeof Model;
+    return ctor.columns.has(SOFT_DELETE_COLUMN) && getAttr(this, SOFT_DELETE_COLUMN) != null;
   }
 
   /** Assigns `attrs` then saves. Returns false — without writing — under the same conditions as save(). */

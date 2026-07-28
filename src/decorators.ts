@@ -363,6 +363,33 @@ export function Lockable<TBase extends ModelConstructor>(
 }
 
 /**
+ * Mixin adding soft delete, mirroring gems like `paranoia`/`discard`: a
+ * `deletedAt` column plus a `@DefaultScope` excluding non-null rows, so a
+ * soft-deleted record disappears from `find`/`all`/`where`/associations
+ * without actually being removed from the table. `Model.destroy()` itself
+ * checks for this column and does an UPDATE instead of a DELETE when
+ * present — see the `SOFT_DELETE_COLUMN` doc comment in Model.ts, the same
+ * hardcoded-column-name convention `Lockable` above uses rather than a
+ * generic "any column can be the soft-delete column" option. `restore()`
+ * and `isDeleted` are always present on every `Model` (like `reload()`),
+ * conditionally active the same way `Lockable`'s checks are, rather than
+ * only being added by this mixin.
+ */
+export function SoftDelete<TBase extends ModelConstructor>(
+  Base: TBase
+): TBase & (new (...args: any[]) => { deletedAt?: Date }) {
+  class WithSoftDelete extends Base {
+    deletedAt?: Date;
+  }
+
+  const metadata = ownClassMetadata(WithSoftDelete);
+  ownColumns(metadata).set('deletedAt', { type: 'date' });
+  ownDefaultScopes(metadata).push((qb) => qb.whereNull('deletedAt'));
+
+  return WithSoftDelete;
+}
+
+/**
  * Mixin adding password authentication, mirroring `has_secure_password`:
  * hardcoded columns `password` (virtual), `passwordConfirmation` (virtual),
  * `passwordDigest` (real, `guarded` so it can never come from mass-assigned
