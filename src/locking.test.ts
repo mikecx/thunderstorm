@@ -36,7 +36,7 @@ afterAll(async () => {
 
 describe('Lockable', () => {
   it('starts a new record at lockVersion 0 and increments it on each successful update', async () => {
-    const post = await Post.create({ title: 'Draft' } as any);
+    const post = await Post.create({ title: 'Draft' });
     expect(post.lockVersion).toBe(0);
 
     await post.update({ title: 'Published' });
@@ -50,7 +50,7 @@ describe('Lockable', () => {
   });
 
   it('throws StaleObjectError when updating a record someone else already changed', async () => {
-    const post = await Post.create({ title: 'Draft' } as any);
+    const post = await Post.create({ title: 'Draft' });
     const staleCopy = await Post.find(post.id);
 
     await post.update({ title: 'Published by first writer' });
@@ -63,7 +63,7 @@ describe('Lockable', () => {
   });
 
   it('throws StaleObjectError when destroying a record someone else already changed', async () => {
-    const post = await Post.create({ title: 'Draft' } as any);
+    const post = await Post.create({ title: 'Draft' });
     const staleCopy = await Post.find(post.id);
 
     await post.update({ title: 'Published' });
@@ -73,7 +73,7 @@ describe('Lockable', () => {
   });
 
   it('does not touch lockVersion or issue a query when nothing changed', async () => {
-    const post = await Post.create({ title: 'Draft' } as any);
+    const post = await Post.create({ title: 'Draft' });
     const ok = await post.save();
 
     expect(ok).toBe(true);
@@ -81,7 +81,7 @@ describe('Lockable', () => {
   });
 
   it('destroying a record at the current version succeeds and removes it', async () => {
-    const post = await Post.create({ title: 'Draft' } as any);
+    const post = await Post.create({ title: 'Draft' });
     const ok = await post.destroy();
 
     expect(ok).toBe(true);
