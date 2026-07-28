@@ -303,6 +303,20 @@ await Session.insertAll([
 
 Like `deleteAll()`, this skips instantiation entirely — no defaults, no validations, and no `beforeSave`/`beforeCreate`/`afterCreate` callbacks run, so anything a model relies on one of those for (`Timestamped`'s `createdAt`/`updatedAt`, `SecureToken`'s token generation, `SecurePassword`'s hashing) must be supplied directly in each row. This makes it a good fit for callback-light models — bulk-seeding, imports — not a drop-in replacement for looping `create()`. Each row's values still pass through the same column casting as `create()`/`where()`, so a caster-backed column (`json`, `encryptedCaster`) is written correctly. Returns the number of rows given, not a driver-reported count — unlike update/delete, a bulk insert either fully succeeds or throws.
 
+`Model.upsertAll()` is `insertAll()`'s upsert sibling — one `INSERT ... ON CONFLICT DO UPDATE` statement instead of a read-then-write loop:
+
+```ts
+await Widget.upsertAll(
+  [
+    { sku: 'ABC', stock: 10 },
+    { sku: 'XYZ', stock: 5 },
+  ],
+  { conflictTarget: 'sku' } // must name a real unique index/constraint — see the migration below
+);
+```
+
+`conflictTarget` must name column(s) with a real unique index/constraint — same "pair with a DB constraint, this library won't create one for you" reasoning as `@Validates({ uniqueness })`. `merge` picks which columns get overwritten on a conflicting row; omit it to overwrite every column the insert supplied. Same tradeoffs as `insertAll()` otherwise (no defaults/validations/callbacks, returns `rows.length` not a driver-reported count).
+
 ### Row locking
 
 `.lock()` is pessimistic locking — `SELECT ... FOR UPDATE` (default) or `.lock('share')` for `FOR SHARE` — a thin wrapper over Knex's own `.forUpdate()`/`.forShare()`. Only meaningful inside `transaction()`: Postgres/MySQL hold the lock until the surrounding transaction commits or rolls back, so use it to serialize concurrent access to a row while you read-then-write it:
