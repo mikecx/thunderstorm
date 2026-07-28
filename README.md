@@ -60,6 +60,7 @@ Collapsed below by default — click a heading to expand it.
 - [Dependent records on destroy](#dependent-records-on-destroy)
 - [Counter cache](#counter-cache)
 - [Transactions](#transactions)
+- [Query logging](#query-logging)
 - [Migrations](#migrations)
 - [Escape hatch: raw SQL](#escape-hatch-raw-sql)
 - [TypeScript typing notes](#typescript-typing-notes)
@@ -1134,6 +1135,31 @@ await transaction(async () => {
 ```
 
 Resolves/commits if `fn` resolves, rejects/rolls back if `fn` throws. `Model.transaction(fn)` is an equivalent static alias. Calling `transaction()` again while already inside one just reuses the same transaction (no savepoints/nested transactions).
+
+</details>
+
+<details>
+<summary>
+
+## Query logging
+
+</summary>
+
+`logQueries(knex, formatter?)` logs every query run through that connection with real per-query timing — the closest thing here to Rails' dev-log `Model Load (2.1ms)  SELECT ...` lines:
+
+```ts
+import { logQueries } from '@mikecx/thunderstorm';
+
+if (process.env.NODE_ENV !== 'production') {
+  logQueries(knex);
+}
+```
+
+```
+(0.4ms) select * from "widgets" where "id" = $1 [1]
+```
+
+The default formatter is a plain one-liner; pass your own `(info: { sql, bindings, ms }) => void` for colorized output, routing to a real logger, filtering slow queries, etc. Both `formatter` and _whether_ to call `logQueries()` at all (dev-only, say) are left to the caller — this only centralizes the fiddly part: correlating Knex's `query` (before) and `query-response`/`query-error` (after) events to compute actual duration, since neither carries timing on its own.
 
 </details>
 
