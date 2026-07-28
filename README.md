@@ -56,6 +56,7 @@ Collapsed below by default — click a heading to expand it.
 - [SecurePassword](#securepassword)
 - [SecureToken](#securetoken)
 - [File attachments](#file-attachments)
+- [Dependent records on destroy](#dependent-records-on-destroy)
 - [Transactions](#transactions)
 - [Migrations](#migrations)
 - [Escape hatch: raw SQL](#escape-hatch-raw-sql)
@@ -952,6 +953,51 @@ export async function down(knex: Knex): Promise<void> {
 - **Gotcha:** if `storage.put` succeeds but the following database write then fails (a validation error, a dropped connection), `attachAvatar`/`attachImages` best-effort calls `storage.delete` on the now-orphaned key — but a delete failure there won't mask the original save error, so a narrow leak window remains under storage flakiness at exactly the wrong moment.
 - Destroy-time cleanup is synchronous and best-effort, not transactional: there's no job queue backing it, so a `storage.delete` failure during `destroy()` makes the whole call reject even though the database row is already gone — you'll see the error and know to retry cleanup, it won't silently leak.
 - Buffers only, no streaming — the whole file needs to be in memory to compute `byteSize`, unlike Rails' IO-stream-based blobs. Fine for avatars/typical uploads, not huge files.
+
+</details>
+
+<details>
+<summary>
+
+## Dependent records on destroy
+
+</summary>
+
+By default, destroying a record does nothing to whatever references it — `post.destroy()` leaves any `Comment` rows with a now-dangling `postId`. `@Dependent(associationMethod, action)` wires that up, Rails' `dependent:` option:
+
+```ts
+class Post extends Model {
+  static tableName = 'posts';
+
+  comments() {
+    return this.hasMany(Comment, { foreignKey: 'postId' });
+  }
+}
+
+@Dependent('comments', 'destroy')
+class PostWithComments extends Post {}
+```
+
+It's a class decorator naming an already-defined association _method_, not a parameter on `hasMany`/`hasOne` themselves — those are plain per-call methods in this library, not a persistent association registry a decorator param could hook into (see [Associations](#associations)). The association is declared exactly as it always is; `@Dependent` just registers `beforeDestroy`/`afterDestroy` callbacks that call it.
+
+Four actions, applying to both `hasMany`-shaped associations (`hasMany`/`hasManyThrough`/`hasAndBelongsToMany`, detected at runtime by the association method's return value having `.destroyAll`) and single-record ones (`hasOne`/`belongsTo`):
+
+```ts
+@Dependent('comments', 'destroy') // destroy() on each — its own callbacks run too
+@Dependent('sessions', 'delete') // bulk DELETE, no callbacks
+@Dependent('comments', { update: { postId: null } }) // bulk UPDATE — nullify the foreign key
+@Dependent('orders', 'restrict') // block the destroy if any order still exists
+class Post extends Model {
+  /* ... */
+}
+```
+
+- `'destroy'` — full `destroy()` lifecycle per related record, including e.g. `@HasManyAttached`'s own purge if the target has one.
+- `'delete'` — bulk `DELETE` (`deleteAll()` for a chain; a single scoped `DELETE` for one record) — no callbacks either way, which is the point, not just fewer queries.
+- `{ update: {...} }` — bulk `UPDATE` (`updateAll()` for a chain, `update()` for one record) — the common case is nullifying a foreign key rather than deleting the related rows at all.
+- `'restrict'` — a `beforeDestroy` check: if the association still has anything, the destroy is blocked (returns `false`) and nothing is touched.
+
+Stack multiple `@Dependent`s on the same class for different associations. There's no DB-level foreign-key cascade here — if you also add a real `ON DELETE CASCADE`/`SET NULL` constraint in a migration, Postgres will additionally enforce it at the schema level, but won't run any thunderstorm callbacks when it fires.
 
 </details>
 

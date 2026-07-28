@@ -786,6 +786,18 @@ export class QueryChain<T extends typeof Model> implements PromiseLike<InstanceT
   }
 
   /**
+   * Bulk-updates every row matching this chain in a single SQL statement —
+   * no `beforeSave`/`afterSave`/`beforeUpdate`/`afterUpdate` callbacks,
+   * no validations, no dirty-tracking. `attrs` is cast the same way
+   * `where()` conditions and `save()` are (`castForWrite` per column), so a
+   * `json`/`encryptedCaster()` column written through here still round-trips
+   * correctly. Returns the number of rows updated.
+   */
+  async updateAll(attrs: Partial<AttributesOf<InstanceType<T>>>): Promise<number> {
+    return this.qb.clone().update(castConditions(this.modelClass, attrs as Record<string, any>));
+  }
+
+  /**
    * Bulk-deletes every row matching this chain in a single SQL statement —
    * Rails' `delete_all`, not `destroy_all`. Skips instantiating records
    * entirely, so `beforeDestroy`/`afterDestroy` callbacks (and anything they

@@ -93,6 +93,38 @@ describe('exists', () => {
   });
 });
 
+describe('updateAll', () => {
+  it('updates every matching row and returns the count updated', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 1 });
+    await User.create({ name: 'Carol', active: 0 });
+
+    const updated = await User.where({ active: 1 } as any).updateAll({ active: 0 });
+
+    expect(updated).toBe(2);
+    expect(await User.all().order('name', 'asc').pluck('active')).toEqual([0, 0, 0]);
+  });
+
+  it('updates nothing and returns 0 when no rows match', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+
+    const updated = await User.where({ name: 'Nobody' } as any).updateAll({ active: 0 });
+
+    expect(updated).toBe(0);
+  });
+
+  it('issues a single bulk statement rather than one query per row', async () => {
+    await User.create({ name: 'Alice' });
+    await User.create({ name: 'Bob' });
+    await User.create({ name: 'Carol' });
+    queryCount = 0;
+
+    await User.all().updateAll({ active: 0 });
+
+    expect(queryCount).toBe(1);
+  });
+});
+
 describe('deleteAll', () => {
   it('deletes every matching row and returns the count deleted', async () => {
     await User.create({ name: 'Alice', active: 1 });
