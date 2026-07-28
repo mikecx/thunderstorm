@@ -785,6 +785,37 @@ export class QueryChain<T extends typeof Model> implements PromiseLike<InstanceT
     return row !== undefined;
   }
 
+  /**
+   * Bulk-deletes every row matching this chain in a single SQL statement —
+   * Rails' `delete_all`, not `destroy_all`. Skips instantiating records
+   * entirely, so `beforeDestroy`/`afterDestroy` callbacks (and anything they
+   * do, like `HasManyAttached`'s auto-purge or a `destroy()` override) never
+   * run. Use `destroyAll()` instead when those need to fire; reach for
+   * `deleteAll()` when the target has no such side effects to preserve and
+   * you want one query instead of N. Returns the number of rows deleted.
+   */
+  async deleteAll(): Promise<number> {
+    return this.qb.clone().delete();
+  }
+
+  /**
+   * Rails' `destroy_all`: loads every matching row and calls destroy() on
+   * each in turn, so beforeDestroy/afterDestroy callbacks (and anything they
+   * do) run exactly as if you'd called destroy() on each individually —
+   * this just saves writing the loop. One query per record plus the initial
+   * SELECT, unlike deleteAll()'s single statement. Returns the count
+   * actually destroyed, which is lower than the number matched if a
+   * beforeDestroy callback blocks any of them.
+   */
+  async destroyAll(): Promise<number> {
+    const records = await this;
+    let destroyed = 0;
+    for (const record of records) {
+      if (await record.destroy()) destroyed++;
+    }
+    return destroyed;
+  }
+
   then<TResult1 = InstanceType<T>[], TResult2 = never>(
     onfulfilled?: ((value: InstanceType<T>[]) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null

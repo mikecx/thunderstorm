@@ -252,6 +252,19 @@ const admins = await User.where({ active: true }).whereRaw('role = ? OR role = ?
 
 See [Escape hatch: raw SQL](#escape-hatch-raw-sql) for what to reach for when even that isn't enough.
 
+### Deleting in bulk
+
+`QueryChain` has two bulk-delete methods, matching Rails' `delete_all`/`destroy_all` split:
+
+```ts
+await Session.where({ userId: user.id }).deleteAll(); // one DELETE statement, no callbacks
+await Post.where({ authorId: user.id }).destroyAll(); // destroy() on each record, callbacks run
+```
+
+`.deleteAll()` issues a single bulk `DELETE` and skips instantiating records entirely — `beforeDestroy`/`afterDestroy` callbacks never run, so anything they'd do (`@HasManyAttached`'s auto-purge, a `destroy()` override) is skipped too. Use it when the target has no such side effects to preserve and you want one query instead of N — e.g. invalidating a user's sessions on password change.
+
+`.destroyAll()` loads every matching row and calls `destroy()` on each in turn, so callbacks run exactly as if you'd called `destroy()` on each individually — this just saves writing the loop. Both return the count affected; for `.destroyAll()` that can be lower than the number matched if a `beforeDestroy` callback blocks some of them.
+
 ## Validations
 
 `@Validates({...})` stacks — apply it more than once on the same field to accumulate rules.
