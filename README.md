@@ -62,6 +62,7 @@ Collapsed below by default — click a heading to expand it.
 - [File attachments](#file-attachments)
 - [Dependent records on destroy](#dependent-records-on-destroy)
 - [Counter cache](#counter-cache)
+- [Touch](#touch)
 - [Transactions](#transactions)
 - [Query logging](#query-logging)
 - [Migrations](#migrations)
@@ -1250,6 +1251,57 @@ await Comment.create({ postId: post.id }); // post.commentsCount, reloaded, is n
 ```
 
 Only create and destroy are handled — incrementing/decrementing via `.increment()`/`.decrement()` (one atomic `UPDATE ... SET commentsCount = commentsCount + 1`, not a load-then-save round trip, so concurrent creates/destroys can't clobber each other's count). Reassigning `postId` on an existing `Comment` to a different post does **not** move the count — that would need the foreign key column name threaded through explicitly to diff the old and new parent. Update both counts by hand if you need that.
+
+</details>
+
+<details>
+<summary>
+
+## Touch
+
+</summary>
+
+`instance.touch(...names)` bumps `updatedAt` (plus any other column names you pass) to now via a direct `UPDATE` — Rails' `touch`. It skips validations and every callback except the write itself. Only meaningful on a `Timestamped` model, since that's what owns `updatedAt`:
+
+```ts
+class Post extends Timestamped(Model) {
+  static tableName = 'posts';
+  @PrimaryKey() id!: number;
+  @Column() title!: string;
+}
+
+const post = await Post.create({ title: 'Hello' });
+await post.touch(); // UPDATE posts SET updatedAt = ? WHERE id = ?
+await post.touch('publishedAt'); // also bumps publishedAt to now
+```
+
+`@Touch(associationMethod)` cascades this up to a `belongsTo`/`hasOne` parent whenever the child is created, saved, or destroyed — mirrors `belongs_to ..., touch: true`. Declared on the child, naming the association method that resolves the parent, the same shape `@CounterCache`/`@Dependent` use:
+
+```ts
+@Touch('post')
+class Comment extends Timestamped(Model) {
+  static tableName = 'comments';
+  @PrimaryKey() id!: number;
+  @Column() postId!: number;
+
+  post() {
+    return this.belongsTo(Post, { foreignKey: 'postId' });
+  }
+}
+
+const comment = await Comment.create({ postId: post.id, body: 'First' }); // post.updatedAt is bumped too
+```
+
+`noTouching(fn)` (also available as the static alias `Model.noTouching(fn)`) suppresses every `touch()` call — direct or `@Touch`-cascaded — for the duration of `fn`, Rails' `no_touching`. It's backed by `AsyncLocalStorage`, the same mechanism `transaction()` uses, rather than a global flag — Node has no per-request thread isolation to make a global safe under concurrent unrelated requests the way Rails' thread-local is:
+
+```ts
+import { noTouching } from './src/Model';
+
+await noTouching(async () => {
+  await comment.update({ body: 'Fixing a typo, not really a meaningful edit' });
+  // post.updatedAt is left alone
+});
+```
 
 </details>
 

@@ -7,6 +7,7 @@ import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
 let knexInstance: Knex | null = null;
 const transactionContext = new AsyncLocalStorage<Knex.Transaction>();
+const noTouchingContext = new AsyncLocalStorage<true>();
 
 export function connect(instance: Knex): Knex {
   knexInstance = instance;
@@ -39,6 +40,24 @@ export async function transaction<T>(fn: () => Promise<T>): Promise<T> {
     throw new Error('No database connection. Call connect(knex(...)) before using models.');
   }
   return knexInstance.transaction((trx) => transactionContext.run(trx, fn));
+}
+
+/** Whether the current async context is inside a `noTouching()` block — checked by `touch()` itself, so `@Touch`'s cascade goes silent for free. */
+function isNoTouching(): boolean {
+  return noTouchingContext.getStore() === true;
+}
+
+/**
+ * Runs `fn` with `touch()` (and anything that cascades through it, i.e.
+ * `@Touch`) turned into a no-op for the duration — Rails' `no_touching`.
+ * Rails scopes this via a thread-local, safe there because a request
+ * typically owns a thread; Node has no such isolation, so a plain global
+ * flag would leak across concurrent unrelated requests. Backed by the same
+ * `AsyncLocalStorage` mechanism `transaction()` already uses above, scoped
+ * to the async call tree under `fn` rather than a global.
+ */
+export async function noTouching<T>(fn: () => Promise<T>): Promise<T> {
+  return noTouchingContext.run(true, fn);
 }
 
 const PERSISTED = Symbol('persisted');
@@ -309,6 +328,11 @@ export class Model extends AttributeModel {
   /** Convenience alias for the standalone transaction() function — see its docs. */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return transaction(fn);
+  }
+
+  /** Convenience alias for the standalone noTouching() function — see its docs. */
+  static noTouching<T>(fn: () => Promise<T>): Promise<T> {
+    return noTouching(fn);
   }
 
   // --- associations --------------------------------------------------------
@@ -906,6 +930,39 @@ export class Model extends AttributeModel {
   get isDeleted(): boolean {
     const ctor = this.constructor as typeof Model;
     return ctor.columns.has(SOFT_DELETE_COLUMN) && getAttr(this, SOFT_DELETE_COLUMN) != null;
+  }
+
+  /**
+   * Bumps `updatedAt` (plus any other column names passed) to now via a
+   * direct UPDATE — Rails' `touch`. Skips validations and every callback
+   * except the write itself; only meaningful on a `Timestamped` model, since
+   * that's what owns `updatedAt`. Returns `false` without writing when
+   * called inside a `noTouching()` block, the same "no-op, not an error"
+   * shape `noTouching` needs so `@Touch`'s cascade can go through this
+   * method unconditionally rather than checking the flag itself.
+   */
+  async touch(...names: string[]): Promise<boolean> {
+    const ctor = this.constructor as typeof Model;
+    if (!ctor.columns.has('updatedAt')) {
+      throw new Error(`${ctor.name} is not touchable (no updatedAt column — mix in Timestamped).`);
+    }
+    if (!this[PERSISTED]) {
+      throw new Error(`Can't touch an unpersisted ${ctor.name}.`);
+    }
+    if (isNoTouching()) return false;
+
+    const pk = ctor.primaryKey;
+    const now = new Date();
+    const updateAttrs: Record<string, any> = { updatedAt: ctor.castForWrite('updatedAt', now) };
+    for (const name of names) updateAttrs[name] = ctor.castForWrite(name, now);
+
+    await ctor.query().where(pk, getAttr(this, pk)).update(updateAttrs);
+
+    setAttr(this, 'updatedAt', now);
+    for (const name of names) setAttr(this, name, now);
+    this.snapshotAttributes();
+
+    return true;
   }
 
   /** Assigns `attrs` then saves. Returns false — without writing — under the same conditions as save(). */

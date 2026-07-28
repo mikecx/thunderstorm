@@ -1,4 +1,4 @@
-export { Model, connect, getKnex, transaction, QueryChain } from './Model';
+export { Model, connect, getKnex, transaction, noTouching, QueryChain } from './Model';
 export { AttributeModel } from './AttributeModel';
 export type { Changes, AttributesOf, SerializeOptions } from './AttributeModel';
 export {
@@ -36,5 +36,6 @@ export type { EncryptedCasterOptions } from './encryption';
 export { Dependent } from './dependent';
 export type { DependentAction } from './dependent';
 export { CounterCache } from './counterCache';
+export { Touch } from './touch';
 export { logQueries } from './logging';
 export type { QueryLogInfo } from './logging';
