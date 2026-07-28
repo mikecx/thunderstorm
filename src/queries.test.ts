@@ -26,6 +26,22 @@ class StampedThing extends Timestamped(Model) {
   name!: string;
 }
 
+class UpsertThing extends Model {
+  static tableName = 'upsert_things';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  email!: string;
+
+  @Column()
+  name!: string;
+
+  @Column()
+  visits!: number;
+}
+
 let knex: Knex;
 let queryCount: number;
 
@@ -48,6 +64,13 @@ beforeEach(async () => {
     t.string('name');
     t.dateTime('createdAt').nullable();
     t.dateTime('updatedAt').nullable();
+  });
+  await knex.schema.dropTableIfExists('upsert_things');
+  await knex.schema.createTable('upsert_things', (t) => {
+    t.increments('id');
+    t.string('email').unique();
+    t.string('name');
+    t.integer('visits').defaultTo(0);
   });
   queryCount = 0;
 });
@@ -182,6 +205,71 @@ describe('insertAll', () => {
     await StampedThing.insertAll([{ name: 'Via insertAll' }]);
     const bulk = await StampedThing.where({ name: 'Via insertAll' }).first();
     expect(bulk!.createdAt).toBeNull();
+  });
+});
+
+describe('upsertAll', () => {
+  it('inserts rows that have no conflict', async () => {
+    const count = await UpsertThing.upsertAll(
+      [
+        { email: 'alice@example.com', name: 'Alice', visits: 1 },
+        { email: 'bob@example.com', name: 'Bob', visits: 1 },
+      ],
+      { conflictTarget: 'email' }
+    );
+
+    expect(count).toBe(2);
+    expect(await UpsertThing.all().order('email', 'asc').pluck('name')).toEqual(['Alice', 'Bob']);
+  });
+
+  it('updates the conflicting row instead of erroring, merging every supplied column by default', async () => {
+    await UpsertThing.create({ email: 'alice@example.com', name: 'Alice', visits: 1 });
+
+    const count = await UpsertThing.upsertAll([{ email: 'alice@example.com', name: 'Alice Updated', visits: 2 }], {
+      conflictTarget: 'email',
+    });
+
+    expect(count).toBe(1);
+    expect(await UpsertThing.all()).toHaveLength(1);
+    const row = await UpsertThing.where({ email: 'alice@example.com' } as any).first();
+    expect(row!.name).toBe('Alice Updated');
+    expect(row!.visits).toBe(2);
+  });
+
+  it('merge option limits which columns get overwritten on conflict', async () => {
+    await UpsertThing.create({ email: 'alice@example.com', name: 'Alice', visits: 5 });
+
+    await UpsertThing.upsertAll([{ email: 'alice@example.com', name: 'Alice Renamed', visits: 1 }], {
+      conflictTarget: 'email',
+      merge: ['name'],
+    });
+
+    const row = await UpsertThing.where({ email: 'alice@example.com' } as any).first();
+    expect(row!.name).toBe('Alice Renamed');
+    expect(row!.visits).toBe(5); // not in `merge`, left untouched
+  });
+
+  it('does nothing and returns 0 for an empty array, without issuing a query', async () => {
+    queryCount = 0;
+
+    const count = await UpsertThing.upsertAll([], { conflictTarget: 'email' });
+
+    expect(count).toBe(0);
+    expect(queryCount).toBe(0);
+  });
+
+  it('issues a single bulk statement rather than one query per row', async () => {
+    queryCount = 0;
+
+    await UpsertThing.upsertAll(
+      [
+        { email: 'alice@example.com', name: 'Alice', visits: 1 },
+        { email: 'bob@example.com', name: 'Bob', visits: 1 },
+      ],
+      { conflictTarget: 'email' }
+    );
+
+    expect(queryCount).toBe(1);
   });
 });
 

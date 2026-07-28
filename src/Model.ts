@@ -250,6 +250,34 @@ export class Model extends AttributeModel {
     return rows.length;
   }
 
+  /**
+   * `insertAll()`'s upsert sibling: a single `INSERT ... ON CONFLICT
+   * (conflictTarget) DO UPDATE` statement (Rails' `upsert_all(attributes,
+   * unique_by:)`) rather than a `firstOrCreate`-style read-then-write loop.
+   * `conflictTarget` must name a real unique index/constraint on those
+   * columns — same "pair with a DB constraint, this library won't create
+   * one for you" reasoning as `associate()`/`@Validates({ uniqueness })`
+   * elsewhere. `merge` picks which columns get overwritten on a conflicting
+   * row; omit it to overwrite every column the insert supplied (Knex's
+   * `.merge()` with no arguments). Same tradeoffs as `insertAll()`
+   * otherwise: no defaults, validations, or callbacks run, each row's
+   * values are still passed through `castForWrite`, and the return value is
+   * `rows.length`, not a driver-reported count.
+   */
+  static async upsertAll<T extends typeof Model>(
+    this: T,
+    rows: Array<Partial<AttributesOf<InstanceType<T>>>>,
+    options: { conflictTarget: string | string[]; merge?: string[] }
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    const casted = rows.map((row) => castConditions(this, row as Record<string, any>));
+    const onConflict = this.query()
+      .insert(casted)
+      .onConflict(options.conflictTarget as any);
+    await (options.merge ? onConflict.merge(options.merge) : onConflict.merge());
+    return rows.length;
+  }
+
   /** Convenience alias for the standalone transaction() function — see its docs. */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return transaction(fn);
