@@ -58,6 +58,7 @@ Collapsed below by default — click a heading to expand it.
 - [Optimistic locking](#optimistic-locking)
 - [File attachments](#file-attachments)
 - [Dependent records on destroy](#dependent-records-on-destroy)
+- [Counter cache](#counter-cache)
 - [Transactions](#transactions)
 - [Migrations](#migrations)
 - [Escape hatch: raw SQL](#escape-hatch-raw-sql)
@@ -1043,6 +1044,41 @@ class Post extends Model {
 - `'restrict'` — a `beforeDestroy` check: if the association still has anything, the destroy is blocked (returns `false`) and nothing is touched.
 
 Stack multiple `@Dependent`s on the same class for different associations. There's no DB-level foreign-key cascade here — if you also add a real `ON DELETE CASCADE`/`SET NULL` constraint in a migration, Postgres will additionally enforce it at the schema level, but won't run any thunderstorm callbacks when it fires.
+
+</details>
+
+<details>
+<summary>
+
+## Counter cache
+
+</summary>
+
+`@CounterCache(associationMethod, column)` auto-maintains a count column on the _other_ side of a `belongsTo`/`hasOne` association — mirrors `belongs_to ..., counter_cache: true`. Declared on the child (the side with the foreign key):
+
+```ts
+class Post extends Model {
+  static tableName = 'posts';
+  @PrimaryKey() id!: number;
+  @Column({ default: 0 }) commentsCount!: number; // you declare this column yourself
+}
+
+@CounterCache('post', 'commentsCount')
+class Comment extends Model {
+  static tableName = 'comments';
+  @PrimaryKey() id!: number;
+  @Column() postId!: number;
+
+  post() {
+    return this.belongsTo(Post, { foreignKey: 'postId' });
+  }
+}
+
+const post = await Post.create({});
+await Comment.create({ postId: post.id }); // post.commentsCount, reloaded, is now 1
+```
+
+Only create and destroy are handled — incrementing/decrementing via `.increment()`/`.decrement()` (one atomic `UPDATE ... SET commentsCount = commentsCount + 1`, not a load-then-save round trip, so concurrent creates/destroys can't clobber each other's count). Reassigning `postId` on an existing `Comment` to a different post does **not** move the count — that would need the foreign key column name threaded through explicitly to diff the old and new parent. Update both counts by hand if you need that.
 
 </details>
 
