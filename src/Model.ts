@@ -3,7 +3,7 @@ import { Knex } from 'knex';
 import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
 import { CALLBACKS, CallbackType } from './decorators';
 import { resolveCaster } from './casters';
-import { RecordInvalid, RecordNotSaved } from './errors';
+import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
 let knexInstance: Knex | null = null;
 const transactionContext = new AsyncLocalStorage<Knex.Transaction>();
@@ -42,6 +42,17 @@ export async function transaction<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const PERSISTED = Symbol('persisted');
+
+/**
+ * Optimistic locking is enabled by convention — a declared `lockVersion`
+ * column (see the `Lockable` mixin in decorators.ts) — rather than a
+ * decorator or opt-in flag, the same convention-over-configuration choice
+ * Rails makes for `lock_version`. save()/destroy() check for this column
+ * directly instead of going through a callback, since only the UPDATE/
+ * DELETE's own WHERE clause and affected-row count can actually detect a
+ * lost race.
+ */
+const LOCK_COLUMN = 'lockVersion';
 
 /**
  * The ActiveRecord-equivalent layer: extends AttributeModel (attributes,
@@ -622,11 +633,26 @@ export class Model extends AttributeModel {
     } else {
       const updateAttrs: Record<string, any> = {};
       for (const [key, [, newValue]] of Object.entries(pendingChanges)) {
-        if (key === pk || ctor.columns.get(key)?.virtual) continue;
+        if (key === pk || key === LOCK_COLUMN || ctor.columns.get(key)?.virtual) continue;
         updateAttrs[key] = ctor.castForWrite(key, newValue);
       }
       if (Object.keys(updateAttrs).length > 0) {
-        await ctor.query().where(pk, getAttr(this, pk)).update(updateAttrs);
+        let qb = ctor.query().where(pk, getAttr(this, pk));
+        const isLockable = ctor.columns.has(LOCK_COLUMN);
+        let nextLockVersion: number | undefined;
+
+        if (isLockable) {
+          const currentLockVersion = getAttr(this, LOCK_COLUMN) as number;
+          nextLockVersion = currentLockVersion + 1;
+          updateAttrs[LOCK_COLUMN] = ctor.castForWrite(LOCK_COLUMN, nextLockVersion);
+          qb = qb.where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, currentLockVersion));
+        }
+
+        const affected = await qb.update(updateAttrs);
+        if (isLockable) {
+          if (affected === 0) throw new StaleObjectError(this);
+          setAttr(this, LOCK_COLUMN, nextLockVersion);
+        }
       }
     }
 
@@ -650,13 +676,24 @@ export class Model extends AttributeModel {
     return this;
   }
 
-  /** Returns false — without deleting — if a beforeDestroy callback aborts the chain. */
+  /**
+   * Returns false — without deleting — if a beforeDestroy callback aborts
+   * the chain. Throws StaleObjectError (not a normal false return) if the
+   * record is optimistically locked and someone else already changed or
+   * deleted it — see `Lockable`/`save()`.
+   */
   async destroy(): Promise<boolean> {
     if (!(await this.runCallbacks('beforeDestroy'))) return false;
 
     const ctor = this.constructor as typeof Model;
     const pk = ctor.primaryKey;
-    await ctor.query().where(pk, getAttr(this, pk)).delete();
+    let qb = ctor.query().where(pk, getAttr(this, pk));
+    const isLockable = ctor.columns.has(LOCK_COLUMN);
+    if (isLockable) qb = qb.where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, getAttr(this, LOCK_COLUMN)));
+
+    const affected = await qb.delete();
+    if (isLockable && affected === 0) throw new StaleObjectError(this);
+
     this[PERSISTED] = false;
 
     await this.runCallbacks('afterDestroy');

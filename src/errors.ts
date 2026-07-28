@@ -47,3 +47,18 @@ export class RecordNotSaved extends Error {
     this.name = 'RecordNotSaved';
   }
 }
+
+/**
+ * Thrown by save()/update()/destroy() on an optimistically-locked (Lockable)
+ * record when its lockVersion no longer matches the database — someone else
+ * changed or deleted it first. Unlike a normal validation failure, this
+ * isn't reported via errors/a false return: it's a genuine lost race the
+ * caller must decide how to handle (reload and retry, surface a conflict to
+ * the user), not something safe to silently ignore.
+ */
+export class StaleObjectError extends Error {
+  constructor(public readonly record: unknown) {
+    super('Attempted to update a stale object');
+    this.name = 'StaleObjectError';
+  }
+}
