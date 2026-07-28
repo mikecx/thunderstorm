@@ -19,8 +19,9 @@ export {
   Enum,
   SecurePassword,
   SecureToken,
+  DefaultScope,
 } from './decorators';
-export type { ColumnOptions, ValidationRule, CallbackType } from './decorators';
+export type { ColumnOptions, ValidationRule, CallbackType, ScopeFn } from './decorators';
 export { Errors, RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 export type { Caster, ColumnType } from './casters';
 export { CASTERS, resolveCaster } from './casters';

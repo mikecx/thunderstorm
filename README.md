@@ -51,6 +51,7 @@ Collapsed below by default — click a heading to expand it.
 - [Custom accessors/setters](#custom-accessorssetters)
 - [Delegate](#delegate)
 - [Scopes](#scopes)
+- [Default scopes](#default-scopes)
 - [Timestamps](#timestamps)
 - [Enums](#enums)
 - [SecurePassword](#securepassword)
@@ -763,6 +764,42 @@ await Post.published()
   .apply(byRecency)
   .apply((c) => c.limit(10));
 ```
+
+</details>
+
+<details>
+<summary>
+
+## Default scopes
+
+</summary>
+
+`@DefaultScope` registers a query modifier that's automatically applied to every read — `find`/`all`/`where`/`findInBatches`/`findEach`, associations, and preloads — unlike an ordinary [scope](#scopes), which you call explicitly:
+
+```ts
+import { Model, Column, PrimaryKey, DefaultScope } from '@mikecx/thunderstorm';
+
+@DefaultScope((qb) => qb.where('archived', 0))
+class Post extends Model {
+  static tableName = 'posts';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  archived!: number;
+}
+
+await Post.all(); // only non-archived posts
+```
+
+Stacking `@DefaultScope` more than once ANDs the conditions together, and a subclass inherits its parent's default scopes on top of its own — same accumulate-on-inherit behavior as `@Validates`. Call `Model.unscoped()` to get a plain `QueryChain` with every default scope bypassed:
+
+```ts
+await Post.unscoped(); // every post, archived or not
+```
+
+Default scopes only reach read paths — `save()`/`destroy()`/`reload()` still operate directly by primary key, unscoped, since they're acting on a specific record the caller already holds a reference to, not running a general listing query.
 
 </details>
 

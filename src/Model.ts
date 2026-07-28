@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Knex } from 'knex';
 import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
-import { CALLBACKS, CallbackType } from './decorators';
+import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn } from './decorators';
 import { resolveCaster } from './casters';
 import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
@@ -68,6 +68,10 @@ export class Model extends AttributeModel {
     return (this as any)[Symbol.metadata]?.[CALLBACKS]?.get(type) ?? [];
   }
 
+  private static defaultScopes(): ScopeFn[] {
+    return (this as any)[Symbol.metadata]?.[DEFAULT_SCOPES]?.get('scopes') ?? [];
+  }
+
   static get primaryKey(): string {
     for (const [name, opts] of this.columns) {
       if (opts.primary) return name;
@@ -86,6 +90,24 @@ export class Model extends AttributeModel {
 
   static query<T extends typeof Model>(this: T): Knex.QueryBuilder {
     return getKnex()(this.assertTableName());
+  }
+
+  /**
+   * `query()` with every registered `@DefaultScope` applied, in registration
+   * order. This is what every read path (`find`/`all`/`where`/
+   * `findInBatches`/associations/preloads) actually builds off — `query()`
+   * itself stays unscoped since it's also the write path (`insertAll`,
+   * `save()`, `destroy()`) and the documented raw-SQL escape hatch.
+   */
+  private static scopedQuery<T extends typeof Model>(this: T): Knex.QueryBuilder {
+    let qb = this.query();
+    for (const scope of this.defaultScopes()) qb = scope(qb);
+    return qb;
+  }
+
+  /** A QueryChain over `query()` (unscoped), bypassing every registered `@DefaultScope` — e.g. to find a soft-deleted row so it can be restored. */
+  static unscoped<T extends typeof Model>(this: T): QueryChain<T> {
+    return new QueryChain(this, this.query());
   }
 
   static fromRow<T extends typeof Model>(this: T, row: Record<string, any>): InstanceType<T> {
@@ -113,17 +135,17 @@ export class Model extends AttributeModel {
   }
 
   static async find<T extends typeof Model>(this: T, id: any): Promise<InstanceType<T> | undefined> {
-    const row = await this.query().where(this.primaryKey, id).first();
+    const row = await this.scopedQuery().where(this.primaryKey, id).first();
     return row ? this.fromRow(row) : undefined;
   }
 
   /** Every row, chainable like where({}) — `await Model.all()`, or `Model.all().order('name', 'asc')`. */
   static all<T extends typeof Model>(this: T): QueryChain<T> {
-    return new QueryChain(this, this.query());
+    return new QueryChain(this, this.scopedQuery());
   }
 
   static where<T extends typeof Model>(this: T, conditions: Partial<AttributesOf<InstanceType<T>>>): QueryChain<T> {
-    return new QueryChain(this, this.query().where(castConditions(this, conditions as Record<string, any>)));
+    return new QueryChain(this, this.scopedQuery().where(castConditions(this, conditions as Record<string, any>)));
   }
 
   /**
@@ -142,7 +164,7 @@ export class Model extends AttributeModel {
     let lastId: any = null;
 
     while (true) {
-      let qb = this.query().orderBy(pk, 'asc').limit(batchSize);
+      let qb = this.scopedQuery().orderBy(pk, 'asc').limit(batchSize);
       if (lastId !== null) qb = qb.where(pk, '>', lastId);
       const rows = await qb;
       if (rows.length === 0) return;
@@ -267,8 +289,8 @@ export class Model extends AttributeModel {
     options: { sourceKey: string; targetKey: string; localKey?: string }
   ): QueryChain<T> {
     const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
-    const subquery = through.query().select(options.targetKey).where(options.sourceKey, getAttr(this, localKey));
-    return new QueryChain(target, target.query().whereIn(target.primaryKey, subquery));
+    const subquery = through.scopedQuery().select(options.targetKey).where(options.sourceKey, getAttr(this, localKey));
+    return new QueryChain(target, target.scopedQuery().whereIn(target.primaryKey, subquery));
   }
 
   /**
@@ -287,7 +309,7 @@ export class Model extends AttributeModel {
     const subquery = getKnex()(options.joinTable)
       .select(options.targetKey)
       .where(options.sourceKey, getAttr(this, localKey));
-    return new QueryChain(target, target.query().whereIn(target.primaryKey, subquery));
+    return new QueryChain(target, target.scopedQuery().whereIn(target.primaryKey, subquery));
   }
 
   /**
@@ -383,7 +405,7 @@ export class Model extends AttributeModel {
     if (records.length === 0) return;
     const localKey = options.localKey ?? this.primaryKey;
     const ids = [...new Set(records.map((r) => getAttr(r, localKey)))];
-    const rows = await target.query().whereIn(options.foreignKey, ids);
+    const rows = await target.scopedQuery().whereIn(options.foreignKey, ids);
 
     const grouped = new Map<any, InstanceType<R>[]>();
     for (const row of rows) {
@@ -410,7 +432,7 @@ export class Model extends AttributeModel {
     if (records.length === 0) return;
     const targetKey = options.targetKey ?? target.primaryKey;
     const ids = [...new Set(records.map((r) => getAttr(r, options.foreignKey)).filter((v) => v != null))];
-    const rows = ids.length > 0 ? await target.query().whereIn(targetKey, ids) : [];
+    const rows = ids.length > 0 ? await target.scopedQuery().whereIn(targetKey, ids) : [];
 
     const byKey = new Map<any, InstanceType<R>>();
     for (const row of rows) {
@@ -436,8 +458,17 @@ export class Model extends AttributeModel {
     if (records.length === 0) return;
     const localKey = options.localKey ?? this.primaryKey;
     const localIds = [...new Set(records.map((r) => getAttr(r, localKey)))];
-    const joinRows = await through.query().whereIn(options.sourceKey, localIds);
-    await groupAndAttachThrough(records, target, joinRows, options.sourceKey, options.targetKey, localKey, options.as);
+    const joinRows = await through.scopedQuery().whereIn(options.sourceKey, localIds);
+    await groupAndAttachThrough(
+      records,
+      target,
+      joinRows,
+      options.sourceKey,
+      options.targetKey,
+      localKey,
+      options.as,
+      (ids) => target.scopedQuery().whereIn(target.primaryKey, ids)
+    );
   }
 
   /** Batch-loads a `hasAndBelongsToMany` association — same shape as `preloadHasManyThrough`, minus the join `Model`. */
@@ -451,7 +482,16 @@ export class Model extends AttributeModel {
     const localKey = options.localKey ?? this.primaryKey;
     const localIds = [...new Set(records.map((r) => getAttr(r, localKey)))];
     const joinRows = await getKnex()(options.joinTable).whereIn(options.sourceKey, localIds);
-    await groupAndAttachThrough(records, target, joinRows, options.sourceKey, options.targetKey, localKey, options.as);
+    await groupAndAttachThrough(
+      records,
+      target,
+      joinRows,
+      options.sourceKey,
+      options.targetKey,
+      localKey,
+      options.as,
+      (ids) => target.scopedQuery().whereIn(target.primaryKey, ids)
+    );
   }
 
   /** Batch-loads a `hasManyPolymorphic` association — same shape as `preloadHasMany`, plus the type filter. */
@@ -464,7 +504,7 @@ export class Model extends AttributeModel {
     if (records.length === 0) return;
     const localKey = options.localKey ?? this.primaryKey;
     const ids = [...new Set(records.map((r) => getAttr(r, localKey)))];
-    const rows = await target.query().whereIn(options.idField, ids).where(options.typeField, options.typeValue);
+    const rows = await target.scopedQuery().whereIn(options.idField, ids).where(options.typeField, options.typeValue);
 
     const grouped = new Map<any, InstanceType<R>[]>();
     for (const row of rows) {
@@ -508,7 +548,7 @@ export class Model extends AttributeModel {
       if (!target) continue; // unrecognized type string — leave `as` unset for these records
 
       const ids = [...new Set(recordsOfType.map((r) => getAttr(r, options.idField)).filter((v) => v != null))];
-      const rows = ids.length > 0 ? await target.query().whereIn(target.primaryKey, ids) : [];
+      const rows = ids.length > 0 ? await target.scopedQuery().whereIn(target.primaryKey, ids) : [];
 
       const byId = new Map<any, InstanceType<typeof target>>();
       for (const row of rows) {
@@ -572,7 +612,7 @@ export class Model extends AttributeModel {
         const value = getAttr(this, attribute);
         if (value === undefined || value === null || value === '') continue;
 
-        let qb = ctor.query().where(attribute, ctor.castForWrite(attribute, value));
+        let qb = ctor.scopedQuery().where(attribute, ctor.castForWrite(attribute, value));
         if (typeof rule.uniqueness === 'object' && rule.uniqueness.scope) {
           const scopes = Array.isArray(rule.uniqueness.scope) ? rule.uniqueness.scope : [rule.uniqueness.scope];
           for (const scopeAttr of scopes) {
@@ -590,7 +630,13 @@ export class Model extends AttributeModel {
     }
   }
 
-  /** Discards unsaved in-memory changes by re-fetching the row from the database. */
+  /**
+   * Discards unsaved in-memory changes by re-fetching the row from the
+   * database. Deliberately unscoped — it's re-fetching a record the caller
+   * already holds a handle to by primary key, not running a general listing
+   * query, so a `@DefaultScope` that would otherwise exclude it (e.g. after
+   * soft-deleting this same instance) shouldn't make `reload()` throw.
+   */
   async reload(): Promise<this> {
     const ctor = this.constructor as typeof Model;
     const pk = ctor.primaryKey;
@@ -747,7 +793,10 @@ function castConditions(ctor: typeof Model, conditions: Record<string, any>): Re
 /**
  * Shared grouping logic for `preloadHasManyThrough`/`preloadHasAndBelongsToMany`
  * — identical once `joinRows` are in hand, they only differ in how those rows
- * get fetched (a join `Model` vs. a bare table name).
+ * get fetched (a join `Model` vs. a bare table name). `fetchTargets` is passed
+ * in (rather than this function calling `target.query()` itself) so the
+ * caller — a `Model` static method — can build the query through the private
+ * `scopedQuery()`, which isn't reachable from this module-level function.
  */
 async function groupAndAttachThrough<R extends typeof Model>(
   records: Model[],
@@ -756,7 +805,8 @@ async function groupAndAttachThrough<R extends typeof Model>(
   sourceKey: string,
   targetKey: string,
   localKey: string,
-  as: string
+  as: string,
+  fetchTargets: (ids: any[]) => Promise<Array<Record<string, any>>>
 ): Promise<void> {
   const targetIdsBySource = new Map<any, any[]>();
   for (const row of joinRows) {
@@ -766,7 +816,7 @@ async function groupAndAttachThrough<R extends typeof Model>(
   }
 
   const allTargetIds = [...new Set(joinRows.map((row) => row[targetKey]))];
-  const targetRows = allTargetIds.length > 0 ? await target.query().whereIn(target.primaryKey, allTargetIds) : [];
+  const targetRows = allTargetIds.length > 0 ? await fetchTargets(allTargetIds) : [];
   const targetsById = new Map<any, InstanceType<R>>();
   for (const row of targetRows) {
     targetsById.set(row[target.primaryKey], target.fromRow(row));
