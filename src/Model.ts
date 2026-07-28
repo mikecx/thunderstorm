@@ -817,6 +817,21 @@ export class QueryChain<T extends typeof Model> implements PromiseLike<InstanceT
     return this;
   }
 
+  /**
+   * Pessimistic row locking — `SELECT ... FOR UPDATE` (default) or `FOR
+   * SHARE`. A thin wrapper over Knex's own `.forUpdate()`/`.forShare()`;
+   * only meaningful inside `transaction()` (Postgres/MySQL hold the lock
+   * until the surrounding transaction commits or rolls back — outside one,
+   * there's no transaction to hold it across, so the lock is released the
+   * instant the SELECT completes). SQLite has no row-level locking at all
+   * and silently ignores this — it already locks at the database/table
+   * level for writes, so there's nothing to add here.
+   */
+  lock(mode: 'update' | 'share' = 'update'): this {
+    this.qb = mode === 'update' ? this.qb.forUpdate() : this.qb.forShare();
+    return this;
+  }
+
   /** Threads this chain through an arbitrary function — the composition point for chaining scopes together. */
   apply<R>(fn: (chain: this) => R): R {
     return fn(this);

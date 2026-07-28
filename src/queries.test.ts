@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import knexFactory, { Knex } from 'knex';
-import { Model, connect } from './Model';
+import { Model, connect, transaction } from './Model';
 import { Column, PrimaryKey, Timestamped } from './decorators';
 
 class User extends Model {
@@ -328,5 +328,34 @@ describe('whereRaw', () => {
     expect(await User.all().whereRaw('active = ?', [1]).count()).toBe(1);
     expect(await User.all().whereRaw('active = ?', [1]).exists()).toBe(true);
     expect(await User.all().whereRaw('active = ?', [0]).pluck('name')).toEqual(['Bob']);
+  });
+});
+
+describe('lock', () => {
+  it('defaults to FOR UPDATE and still returns the matching rows, inside a transaction', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 0 });
+
+    const active = await transaction(() => User.where({ active: 1 } as any).lock());
+    expect(active.map((u) => u.name)).toEqual(['Alice']);
+  });
+
+  it('accepts an explicit FOR SHARE mode', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+
+    const rows = await transaction(() => User.all().lock('share'));
+    expect(rows.map((u) => u.name)).toEqual(['Alice']);
+  });
+
+  it('composes with the rest of the chain rather than replacing it', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 1 });
+
+    const names = await transaction(() =>
+      User.where({ active: 1 } as any)
+        .lock()
+        .order('name', 'desc')
+    );
+    expect(names.map((u) => u.name)).toEqual(['Bob', 'Alice']);
   });
 });
