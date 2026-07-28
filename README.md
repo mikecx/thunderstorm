@@ -311,7 +311,7 @@ await Widget.upsertAll(
     { sku: 'ABC', stock: 10 },
     { sku: 'XYZ', stock: 5 },
   ],
-  { conflictTarget: 'sku' } // must name a real unique index/constraint — see the migration below
+  { conflictTarget: 'sku' } // must name a real unique index/constraint on `sku` — see below
 );
 ```
 
