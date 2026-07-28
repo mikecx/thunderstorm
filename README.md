@@ -445,6 +445,15 @@ class Post extends Model {
 - `hasMany` returns a `QueryChain` — `await user.posts()`, or scope it first: `user.posts().order('title', 'asc').first()`.
 - `hasOne`/`belongsTo` return a `Promise` directly — `await post.author()`.
 
+`hasOne`/`belongsTo` (and their polymorphic equivalents) are memoized per instance: calling `post.author()` twice only queries once.
+
+```ts
+await post.author(); // queries
+await post.author(); // cached — no query
+```
+
+Pass `{ reload: true }` to force a fresh load for one call, or call `record.reload()` to clear every cached association on that instance at once (along with its own attributes). `hasMany`/`hasManyThrough`/`hasAndBelongsToMany`/`hasManyPolymorphic` are **not** memoized — they return a `QueryChain`, and staying lazy/chainable (`user.posts().where(...)`) is more valuable than caching here, since `QueryChain.where()` mutates the chain in place rather than returning a copy, so a cached chain could get silently corrupted by an unrelated caller's further scoping.
+
 See [Many-to-many associations](#many-to-many-associations) and [Polymorphic associations](#polymorphic-associations) below for the less-common shapes.
 
 ## Avoiding N+1 queries
