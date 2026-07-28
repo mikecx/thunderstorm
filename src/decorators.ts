@@ -34,6 +34,16 @@ export interface ColumnOptions {
    * here.
    */
   guarded?: boolean;
+  /**
+   * Written on create, then excluded from every subsequent `save()`'s
+   * `UPDATE` — mirrors Rails' `attr_readonly`. This is *not* a hard runtime
+   * guard: the attribute can still be assigned in JS and still shows up in
+   * `changes`/`isChanged` like any other dirty-tracked column, it's just
+   * silently left out of the SQL sent to the database once the record is
+   * persisted. Same shape as `guarded` — a column-metadata flag excluding
+   * the column from one specific operation, not a thrown error.
+   */
+  readonly?: boolean;
 }
 
 export const COLUMNS = Symbol('columns');

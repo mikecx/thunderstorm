@@ -83,6 +83,66 @@ describe('virtual (non-persisted) attributes', () => {
   });
 });
 
+describe('readonly attributes', () => {
+  class Invoice extends Model {
+    static tableName = 'invoices';
+
+    @PrimaryKey()
+    id!: number;
+
+    @Column()
+    status!: string;
+
+    @Column({ readonly: true })
+    invoiceNumber!: string;
+  }
+
+  beforeEach(async () => {
+    await knex.schema.dropTableIfExists('invoices');
+    await knex.schema.createTable('invoices', (t) => {
+      t.increments('id');
+      t.string('status');
+      t.string('invoiceNumber');
+    });
+  });
+
+  it('is written on create like any other column', async () => {
+    const invoice = await Invoice.create({ status: 'draft', invoiceNumber: 'INV-001' });
+    const row = await knex('invoices').where('id', invoice.id).first();
+    expect(row.invoiceNumber).toBe('INV-001');
+  });
+
+  it('is excluded from the UPDATE once persisted, leaving the DB value untouched', async () => {
+    const invoice = await Invoice.create({ status: 'draft', invoiceNumber: 'INV-001' });
+
+    await invoice.update({ status: 'sent', invoiceNumber: 'INV-002' });
+
+    const row = await knex('invoices').where('id', invoice.id).first();
+    expect(row.status).toBe('sent'); // the other column still updates normally
+    expect(row.invoiceNumber).toBe('INV-001'); // readonly column didn't move
+  });
+
+  it('is not a hard guard — plain JS assignment is allowed and dirty-tracked, it is only excluded from the UPDATE', async () => {
+    const invoice = await Invoice.create({ status: 'draft', invoiceNumber: 'INV-001' });
+
+    invoice.invoiceNumber = 'INV-002';
+    expect(invoice.isAttributeChanged('invoiceNumber')).toBe(true);
+
+    await invoice.save();
+    expect(invoice.invoiceNumber).toBe('INV-002'); // in-memory value reflects the assignment
+    expect((await knex('invoices').where('id', invoice.id).first()).invoiceNumber).toBe('INV-001'); // DB does not
+  });
+
+  it('does not block a save with no other changed columns', async () => {
+    const invoice = await Invoice.create({ status: 'draft', invoiceNumber: 'INV-001' });
+
+    invoice.invoiceNumber = 'INV-002';
+    const ok = await invoice.save();
+
+    expect(ok).toBe(true);
+  });
+});
+
 describe('attribute defaults', () => {
   class Ticket extends Model {
     static tableName = 'tickets';
