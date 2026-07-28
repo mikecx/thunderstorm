@@ -16,6 +16,7 @@ export {
   Delegate,
   Timestamped,
   Lockable,
+  SoftDelete,
   Enum,
   SecurePassword,
   SecureToken,

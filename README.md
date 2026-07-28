@@ -57,6 +57,7 @@ Collapsed below by default — click a heading to expand it.
 - [SecurePassword](#securepassword)
 - [SecureToken](#securetoken)
 - [Optimistic locking](#optimistic-locking)
+- [Soft delete](#soft-delete)
 - [File attachments](#file-attachments)
 - [Dependent records on destroy](#dependent-records-on-destroy)
 - [Counter cache](#counter-cache)
@@ -934,6 +935,40 @@ await staleCopy!.update({ title: 'Also published' }); // throws StaleObjectError
 Unlike a normal validation failure, `StaleObjectError` is thrown rather than reported via `errors`/a `false` return — even from plain `save()`/`update()`, not just the `*OrFail()` variants — since a lost race isn't safe to silently ignore. Catch it where you can meaningfully recover (reload and retry, surface a conflict to the user).
 
 `Model.insertAll()`/`QueryChain.updateAll()`/`deleteAll()`/`destroyAll()` don't go through `save()`/`destroy()`, so they bypass the lock check entirely — same trade-off as skipping callbacks/validations.
+
+</details>
+
+<details>
+<summary>
+
+## Soft delete
+
+</summary>
+
+`SoftDelete(Base)` adds a `deletedAt` column and a [default scope](#default-scopes) excluding non-null rows, mirroring gems like `paranoia`/`discard`: `destroy()` on a soft-deletable model does an UPDATE setting `deletedAt` instead of a DELETE, still running `beforeDestroy`/`afterDestroy` callbacks around it — the row stays in the table, just invisible to normal reads.
+
+```ts
+class Post extends SoftDelete(Model) {
+  static tableName = 'posts';
+  @PrimaryKey() id!: number;
+  @Column() title!: string;
+}
+
+const post = await Post.create({ title: 'Draft' });
+await post.destroy();
+
+await Post.find(post.id); // undefined — excluded by the default scope
+post.isPersisted; // true — the row still exists
+post.isDeleted; // true
+
+const trashed = (await Post.unscoped()).find((p) => p.id === post.id)!;
+await trashed.restore(); // clears deletedAt
+await Post.find(post.id); // back
+```
+
+`restore()`/`isDeleted` are always present on every `Model` (like `reload()`), a no-op/`false`/throwing guard on a model without a `deletedAt` column rather than something only added by the mixin — the same convention `Lockable`'s checks already follow. `restore()` doesn't run callbacks or go through the `Lockable` check, the same documented simplification `insertAll()`/`deleteAll()` already make elsewhere.
+
+Since it's built on `@DefaultScope`, `SoftDelete` composes with everything that mechanism reaches — a soft-deleted record disappears from `where()`-based associations and preloads too, not just `find`/`all`.
 
 </details>
 
