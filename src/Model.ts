@@ -633,7 +633,8 @@ export class Model extends AttributeModel {
     } else {
       const updateAttrs: Record<string, any> = {};
       for (const [key, [, newValue]] of Object.entries(pendingChanges)) {
-        if (key === pk || key === LOCK_COLUMN || ctor.columns.get(key)?.virtual) continue;
+        const columnOptions = ctor.columns.get(key);
+        if (key === pk || key === LOCK_COLUMN || columnOptions?.virtual || columnOptions?.readonly) continue;
         updateAttrs[key] = ctor.castForWrite(key, newValue);
       }
       if (Object.keys(updateAttrs).length > 0) {

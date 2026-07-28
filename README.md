@@ -184,6 +184,23 @@ User.permit({ name: 'Alice', role: 'admin' }, ['name', 'role']); // => { name: '
 
 `permit()` only ever returns declared `@Column()` keys that are also present in the raw input, always excludes the primary key, and always excludes any `@Column({ guarded: true })` field regardless of the allowlist — think of `allowedKeys` as the primary allowlist mechanism (safe by construction: you opt fields in per form/endpoint) and `guarded` as defense in depth on top of it (a blocklist alone isn't enough — it only protects fields you remembered to mark). `guarded` also excludes a column from `serializableHash()`/`toJSON()`'s default output (see [Serialization](#serialization)) — a password digest shouldn't come _from_ untrusted input or go _out_ in a response.
 
+### Readonly attributes
+
+`@Column({ readonly: true })` mirrors Rails' `attr_readonly`: the column is written on `create()` like any other, but excluded from every subsequent `save()`'s `UPDATE`.
+
+```ts
+class Invoice extends Model {
+  @Column() status!: string;
+  @Column({ readonly: true }) invoiceNumber!: string;
+}
+
+const invoice = await Invoice.create({ status: 'draft', invoiceNumber: 'INV-001' });
+await invoice.update({ status: 'sent', invoiceNumber: 'INV-002' });
+// status is now 'sent' in the DB; invoiceNumber is still 'INV-001' there
+```
+
+This is **not** a hard runtime guard — `invoice.invoiceNumber` can still be assigned in JS and still shows up in `changes`/`isChanged` like any other dirty-tracked column (`invoice.invoiceNumber` reads back `'INV-002'` after the call above). It's silently left out of the SQL, the same way `virtual` columns are excluded from `INSERT`/`UPDATE` but stay fully dirty-tracked in memory — if you need writes to actually throw, check `isAttributeChanged('invoiceNumber')` yourself before saving.
+
 ## Convenience methods
 
 ```ts
