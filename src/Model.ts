@@ -42,6 +42,7 @@ export async function transaction<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const PERSISTED = Symbol('persisted');
+const ASSOCIATION_CACHE = Symbol('associationCache');
 
 /**
  * Optimistic locking is enabled by convention — a declared `lockVersion`
@@ -74,6 +75,33 @@ export class Model extends AttributeModel {
   static tableName: string;
 
   private [PERSISTED] = false;
+  private [ASSOCIATION_CACHE]?: Map<string, Promise<any>>;
+
+  /**
+   * Memoizes a single-record association load (`hasOne`/`belongsTo`/
+   * `hasOnePolymorphic`/`belongsToPolymorphic`) per instance, so calling the
+   * same association method twice on the same record only queries once —
+   * mirroring Rails' association caching. `key` identifies the association
+   * by its shape (which method, `target`, foreign key) rather than by the
+   * caller's own wrapper method name, since that name isn't visible at this
+   * layer; two differently-named wrapper methods with the same target and
+   * foreign key share a cache entry, which is an acceptable, unusual edge
+   * case rather than something worth solving here. A failed load isn't
+   * cached, so the next call retries instead of replaying the rejection
+   * forever. Deliberately not used by the `hasMany`-family methods — see
+   * their comment below.
+   */
+  private memoizeAssociation<R>(key: string, reload: boolean | undefined, load: () => Promise<R>): Promise<R> {
+    const cache = (this[ASSOCIATION_CACHE] ??= new Map());
+    if (!reload && cache.has(key)) return cache.get(key) as Promise<R>;
+
+    const promise = load().catch((err) => {
+      cache.delete(key);
+      throw err;
+    });
+    cache.set(key, promise);
+    return promise;
+  }
 
   static callbacksFor(type: CallbackType): string[] {
     return (this as any)[Symbol.metadata]?.[CALLBACKS]?.get(type) ?? [];
@@ -291,8 +319,22 @@ export class Model extends AttributeModel {
   // import — even a circular one between two model files — is safe. Only a
   // *class-body* reference (a static field initializer, a decorator argument)
   // would need a thunk to dodge module load order.
+  //
+  // The QueryChain-returning methods below (hasMany, hasManyThrough,
+  // hasAndBelongsToMany, hasManyPolymorphic) are deliberately NOT memoized,
+  // unlike hasOne/belongsTo/*Polymorphic further down: QueryChain.where()
+  // mutates its own `qb` in place and returns `this` rather than a copy, so
+  // caching and handing back the same QueryChain instance across calls would
+  // let one caller's `.where(...)`/`.order(...)` chaining silently corrupt
+  // what a later, unrelated call to the same association sees. Staying
+  // lazy/chainable (see the hasManyThrough doc comment) and staying safely
+  // memoizable are in tension here; this library picks the former, the same
+  // choice Rails' own collection-proxy semantics make (chaining an
+  // association always issues a fresh, uncached query; only a bare,
+  // unchained access is memoized) — just without reimplementing a proxy to
+  // get there.
 
-  /** One-to-many: rows in `target` whose `foreignKey` equals this record's primary key (or `localKey`). */
+  /** One-to-many: rows in `target` whose `foreignKey` equals this record's primary key (or `localKey`). Not memoized — see the comment above. */
   protected hasMany<T extends typeof Model>(
     target: T,
     options: { foreignKey: string; localKey?: string }
@@ -301,23 +343,33 @@ export class Model extends AttributeModel {
     return target.where({ [options.foreignKey]: getAttr(this, localKey) } as Partial<AttributesOf<InstanceType<T>>>);
   }
 
-  /** One-to-one, owning side: the single row in `target` whose `foreignKey` equals this record's primary key. */
+  /**
+   * One-to-one, owning side: the single row in `target` whose `foreignKey`
+   * equals this record's primary key. Memoized per instance — a second call
+   * with the same `target`/`foreignKey` returns the same in-flight/resolved
+   * promise without re-querying; pass `{ reload: true }` to force a fresh
+   * load, or call `reload()` to clear every cached association at once.
+   */
   protected hasOne<T extends typeof Model>(
     target: T,
-    options: { foreignKey: string; localKey?: string }
+    options: { foreignKey: string; localKey?: string; reload?: boolean }
   ): Promise<InstanceType<T> | undefined> {
-    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
-    return target
-      .where({ [options.foreignKey]: getAttr(this, localKey) } as Partial<AttributesOf<InstanceType<T>>>)
-      .first();
+    const key = `hasOne:${target.name}:${options.foreignKey}`;
+    return this.memoizeAssociation(key, options.reload, () => {
+      const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+      return target
+        .where({ [options.foreignKey]: getAttr(this, localKey) } as Partial<AttributesOf<InstanceType<T>>>)
+        .first();
+    });
   }
 
-  /** Inverse of hasMany/hasOne: the single row in `target` referenced by this record's `foreignKey` column. */
+  /** Inverse of hasMany/hasOne: the single row in `target` referenced by this record's `foreignKey` column. Memoized — see `hasOne`'s doc comment. */
   protected belongsTo<T extends typeof Model>(
     target: T,
-    options: { foreignKey: string }
+    options: { foreignKey: string; reload?: boolean }
   ): Promise<InstanceType<T> | undefined> {
-    return target.find(getAttr(this, options.foreignKey));
+    const key = `belongsTo:${target.name}:${options.foreignKey}`;
+    return this.memoizeAssociation(key, options.reload, () => target.find(getAttr(this, options.foreignKey)));
   }
 
   /**
@@ -399,16 +451,21 @@ export class Model extends AttributeModel {
    * deliberately explicit rather than inferring a class name (`ctor.name`)
    * the way Rails defaults to, so renaming a model class can never silently
    * orphan every row that already references it under the old name.
+   * Memoized per instance — see `hasOne`'s doc comment; `{ reload: true }`
+   * forces a fresh load.
    */
   protected belongsToPolymorphic<TTypes extends Record<string, typeof Model>>(
-    options: { idField: string; typeField: string },
+    options: { idField: string; typeField: string; reload?: boolean },
     types: TTypes
   ): Promise<InstanceType<TTypes[keyof TTypes]> | undefined> {
-    const type = getAttr(this, options.typeField);
-    const id = getAttr(this, options.idField);
-    const target = types[type];
-    if (!target || id == null) return Promise.resolve(undefined);
-    return target.find(id) as Promise<InstanceType<TTypes[keyof TTypes]> | undefined>;
+    const key = `belongsToPolymorphic:${options.idField}:${options.typeField}`;
+    return this.memoizeAssociation(key, options.reload, () => {
+      const type = getAttr(this, options.typeField);
+      const id = getAttr(this, options.idField);
+      const target = types[type];
+      if (!target || id == null) return Promise.resolve(undefined);
+      return target.find(id) as Promise<InstanceType<TTypes[keyof TTypes]> | undefined>;
+    });
   }
 
   /**
@@ -416,7 +473,7 @@ export class Model extends AttributeModel {
    * `Post`'s comments, where `Comment.commentableType` must also match
    * `typeValue` (the same stable string passed to `belongsToPolymorphic`'s
    * `types` map on the `Comment` side) so a comment on a `Photo` with the
-   * same id never leaks in.
+   * same id never leaks in. Not memoized — same reasoning as `hasMany`.
    */
   protected hasManyPolymorphic<T extends typeof Model>(
     target: T,
@@ -429,12 +486,19 @@ export class Model extends AttributeModel {
     } as Partial<AttributesOf<InstanceType<T>>>);
   }
 
-  /** One-to-one flavor of `hasManyPolymorphic` — same filter, first match only. */
+  /**
+   * One-to-one flavor of `hasManyPolymorphic` — same filter, first match
+   * only. Memoized per instance — see `hasOne`'s doc comment; `{ reload:
+   * true }` forces a fresh load. Delegates the actual query to
+   * `hasManyPolymorphic` (itself unmemoized), memoizing only the awaited
+   * result of `.first()`.
+   */
   protected hasOnePolymorphic<T extends typeof Model>(
     target: T,
-    options: { idField: string; typeField: string; typeValue: string; localKey?: string }
+    options: { idField: string; typeField: string; typeValue: string; localKey?: string; reload?: boolean }
   ): Promise<InstanceType<T> | undefined> {
-    return this.hasManyPolymorphic(target, options).first();
+    const key = `hasOnePolymorphic:${target.name}:${options.idField}:${options.typeField}:${options.typeValue}`;
+    return this.memoizeAssociation(key, options.reload, () => this.hasManyPolymorphic(target, options).first());
   }
 
   /**
@@ -679,10 +743,13 @@ export class Model extends AttributeModel {
 
   /**
    * Discards unsaved in-memory changes by re-fetching the row from the
-   * database. Deliberately unscoped — it's re-fetching a record the caller
-   * already holds a handle to by primary key, not running a general listing
-   * query, so a `@DefaultScope` that would otherwise exclude it (e.g. after
-   * soft-deleting this same instance) shouldn't make `reload()` throw.
+   * database, and clears every cached `hasOne`/`belongsTo`/`*Polymorphic`
+   * association (see `memoizeAssociation`) so the next access re-queries
+   * instead of returning stale, pre-reload results. Deliberately unscoped —
+   * it's re-fetching a record the caller already holds a handle to by
+   * primary key, not running a general listing query, so a `@DefaultScope`
+   * that would otherwise exclude it (e.g. after soft-deleting this same
+   * instance) shouldn't make `reload()` throw.
    */
   async reload(): Promise<this> {
     const ctor = this.constructor as typeof Model;
@@ -691,6 +758,7 @@ export class Model extends AttributeModel {
     if (!row) {
       throw new Error(`Can't reload: no ${ctor.name} found with ${pk} = ${getAttr(this, pk)}`);
     }
+    this[ASSOCIATION_CACHE]?.clear();
     this.assignRow(row);
     this.snapshotAttributes();
     return this;

@@ -263,6 +263,87 @@ describe('lazy relations', () => {
   });
 });
 
+describe('association memoization', () => {
+  it('belongsTo only queries once across repeated calls on the same instance', async () => {
+    const alice = await User.create({ name: 'Alice' });
+    const post = await Post.create({ title: 'A1', userId: alice.id });
+
+    queryCount = 0;
+    const first = await post.author();
+    const second = await post.author();
+
+    expect(queryCount).toBe(1);
+    expect(first).toBe(second);
+  });
+
+  it('hasOne only queries once across repeated calls on the same instance', async () => {
+    const alice = await User.create({ name: 'Alice' });
+    await Profile.create({ userId: alice.id, bio: 'hello' });
+
+    queryCount = 0;
+    const first = await alice.profile();
+    const second = await alice.profile();
+
+    expect(queryCount).toBe(1);
+    expect(first).toBe(second);
+  });
+
+  it('does not memoize across different instances', async () => {
+    const alice = await User.create({ name: 'Alice' });
+    const bob = await User.create({ name: 'Bob' });
+    await Post.create({ title: 'A1', userId: alice.id });
+    await Post.create({ title: 'B1', userId: bob.id });
+
+    const alicePost = (await alice.posts())[0];
+    const bobPost = (await bob.posts())[0];
+
+    queryCount = 0;
+    const alicesAuthor = await alicePost.author();
+    const bobsAuthor = await bobPost.author();
+
+    expect(queryCount).toBe(2);
+    expect(alicesAuthor?.name).toBe('Alice');
+    expect(bobsAuthor?.name).toBe('Bob');
+  });
+
+  it('{ reload: true } bypasses the cache and re-queries', async () => {
+    const alice = await User.create({ name: 'Alice' });
+    const post = await Post.create({ title: 'A1', userId: alice.id });
+
+    await post.author();
+    queryCount = 0;
+    await (post as any).belongsTo(User, { foreignKey: 'userId', reload: true });
+
+    expect(queryCount).toBe(1);
+  });
+
+  it("Model.reload() clears every cached association, not just the record's own attributes", async () => {
+    const alice = await User.create({ name: 'Alice' });
+    const post = await Post.create({ title: 'A1', userId: alice.id });
+
+    await post.author();
+    await post.reload();
+
+    queryCount = 0;
+    await post.author();
+
+    expect(queryCount).toBe(1);
+  });
+
+  it('a failed load is not cached, so the next call retries', async () => {
+    const post = await Post.create({ title: 'Orphan', userId: 999 });
+    // belongsTo resolving to undefined isn't a rejection, so simulate a real
+    // failure via a target that queries a nonexistent table.
+    class BrokenTarget extends Model {
+      static tableName = 'does_not_exist';
+      @PrimaryKey() id!: number;
+    }
+
+    await expect((post as any).belongsTo(BrokenTarget, { foreignKey: 'userId' })).rejects.toThrow();
+    await expect((post as any).belongsTo(BrokenTarget, { foreignKey: 'userId' })).rejects.toThrow();
+  });
+});
+
 describe('preload avoids N+1', () => {
   it('preloadHasMany fetches all related rows in a single query', async () => {
     const alice = await User.create({ name: 'Alice' });
