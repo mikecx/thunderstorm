@@ -115,6 +115,19 @@ describe('built-in casters round-trip through the database', () => {
     expect(matches.map((w) => w.name)).toEqual(['Configured']);
   });
 
+  it('insertAll() applies the column cast to each row too, not just save()', async () => {
+    await Widget.insertAll([
+      { name: 'Bulk A', metadata: { color: 'red' } as any },
+      { name: 'Bulk B', metadata: { color: 'blue' } as any },
+    ]);
+
+    const rawRows = await knex('widgets').orderBy('name', 'asc');
+    expect(rawRows.map((r) => typeof r.metadata)).toEqual(['string', 'string']);
+
+    const reloaded = await Widget.where({ metadata: { color: 'red' } as any });
+    expect(reloaded.map((w) => w.name)).toEqual(['Bulk A']);
+  });
+
   it('number: coerces on load even if the driver hands back a string-ish value', async () => {
     const widget = await Widget.create({ name: 'Counted', quantity: 5 });
     await knex('widgets')

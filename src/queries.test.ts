@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import knexFactory, { Knex } from 'knex';
 import { Model, connect } from './Model';
-import { Column, PrimaryKey } from './decorators';
+import { Column, PrimaryKey, Timestamped } from './decorators';
 
 class User extends Model {
   static tableName = 'users';
@@ -14,6 +14,16 @@ class User extends Model {
 
   @Column()
   active!: number;
+}
+
+class StampedThing extends Timestamped(Model) {
+  static tableName = 'stamped_things';
+
+  @PrimaryKey()
+  id!: number;
+
+  @Column()
+  name!: string;
 }
 
 let knex: Knex;
@@ -31,6 +41,13 @@ beforeEach(async () => {
     t.increments('id');
     t.string('name');
     t.integer('active').defaultTo(1);
+  });
+  await knex.schema.dropTableIfExists('stamped_things');
+  await knex.schema.createTable('stamped_things', (t) => {
+    t.increments('id');
+    t.string('name');
+    t.dateTime('createdAt').nullable();
+    t.dateTime('updatedAt').nullable();
   });
   queryCount = 0;
 });
@@ -122,6 +139,49 @@ describe('updateAll', () => {
     await User.all().updateAll({ active: 0 });
 
     expect(queryCount).toBe(1);
+  });
+});
+
+describe('insertAll', () => {
+  it('inserts every row and returns the count given', async () => {
+    const inserted = await User.insertAll([
+      { name: 'Alice', active: 1 },
+      { name: 'Bob', active: 0 },
+      { name: 'Carol', active: 1 },
+    ] as any);
+
+    expect(inserted).toBe(3);
+    expect(await User.all().order('name', 'asc').pluck('name')).toEqual(['Alice', 'Bob', 'Carol']);
+  });
+
+  it('does nothing and returns 0 for an empty array, without issuing a query', async () => {
+    queryCount = 0;
+
+    const inserted = await User.insertAll([]);
+
+    expect(inserted).toBe(0);
+    expect(queryCount).toBe(0);
+  });
+
+  it('issues a single bulk statement rather than one query per row', async () => {
+    queryCount = 0;
+
+    await User.insertAll([
+      { name: 'Alice', active: 1 },
+      { name: 'Bob', active: 1 },
+      { name: 'Carol', active: 1 },
+    ] as any);
+
+    expect(queryCount).toBe(1);
+  });
+
+  it('does not run beforeCreate callbacks, unlike create()', async () => {
+    const created = await StampedThing.create({ name: 'Via create' } as any);
+    expect(created.createdAt).toBeInstanceOf(Date);
+
+    await StampedThing.insertAll([{ name: 'Via insertAll' } as any]);
+    const bulk = await StampedThing.where({ name: 'Via insertAll' } as any).first();
+    expect(bulk!.createdAt).toBeNull();
   });
 });
 

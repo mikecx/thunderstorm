@@ -253,18 +253,32 @@ const admins = await User.where({ active: true }).whereRaw('role = ? OR role = ?
 
 See [Escape hatch: raw SQL](#escape-hatch-raw-sql) for what to reach for when even that isn't enough.
 
-### Deleting in bulk
+### Bulk operations
 
-`QueryChain` has two bulk-delete methods, matching Rails' `delete_all`/`destroy_all` split:
+`QueryChain` has bulk update/delete methods, matching Rails' `update_all`/`delete_all`/`destroy_all` split:
 
 ```ts
+await Session.where({ userId: user.id }).updateAll({ revoked: true }); // one UPDATE statement
 await Session.where({ userId: user.id }).deleteAll(); // one DELETE statement, no callbacks
 await Post.where({ authorId: user.id }).destroyAll(); // destroy() on each record, callbacks run
 ```
 
+`.updateAll()` issues a single bulk `UPDATE` with the given attributes (cast the same way `where()` casts condition values), no instantiation and no `beforeSave`/`afterSave`/`beforeUpdate`/`afterUpdate` callbacks.
+
 `.deleteAll()` issues a single bulk `DELETE` and skips instantiating records entirely — `beforeDestroy`/`afterDestroy` callbacks never run, so anything they'd do (`@HasManyAttached`'s auto-purge, a `destroy()` override) is skipped too. Use it when the target has no such side effects to preserve and you want one query instead of N — e.g. invalidating a user's sessions on password change.
 
-`.destroyAll()` loads every matching row and calls `destroy()` on each in turn, so callbacks run exactly as if you'd called `destroy()` on each individually — this just saves writing the loop. Both return the count affected; for `.destroyAll()` that can be lower than the number matched if a `beforeDestroy` callback blocks some of them.
+`.destroyAll()` loads every matching row and calls `destroy()` on each in turn, so callbacks run exactly as if you'd called `destroy()` on each individually — this just saves writing the loop. All three return the count affected, not the count matched — for `.destroyAll()` those can differ if a `beforeDestroy` callback blocks some of them.
+
+On the create side, `Model.insertAll()` is the bulk counterpart to `create()`:
+
+```ts
+await Session.insertAll([
+  { userId: 1, token: 'a', expiresAt },
+  { userId: 2, token: 'b', expiresAt },
+]); // one INSERT statement
+```
+
+Like `deleteAll()`, this skips instantiation entirely — no defaults, no validations, and no `beforeSave`/`beforeCreate`/`afterCreate` callbacks run, so anything a model relies on one of those for (`Timestamped`'s `createdAt`/`updatedAt`, `SecureToken`'s token generation, `SecurePassword`'s hashing) must be supplied directly in each row. This makes it a good fit for callback-light models — bulk-seeding, imports — not a drop-in replacement for looping `create()`. Each row's values still pass through the same column casting as `create()`/`where()`, so a caster-backed column (`json`, `encryptedCaster`) is written correctly. Returns the number of rows given, not a driver-reported count — unlike update/delete, a bulk insert either fully succeeds or throws.
 
 ## Validations
 

@@ -175,6 +175,29 @@ export class Model extends AttributeModel {
     return this.create({ ...conditions, ...defaults } as Record<string, any>);
   }
 
+  /**
+   * Bulk-inserts `rows` in a single INSERT statement — the create-side
+   * counterpart to `QueryChain.deleteAll()`. Like `deleteAll()`, this skips
+   * instantiation entirely: no defaults, no validations, and no
+   * `beforeSave`/`beforeCreate`/`afterCreate` callbacks run, so anything a
+   * model relies on one of those for (Timestamped's `createdAt`/`updatedAt`,
+   * SecureToken's token generation, SecurePassword's hashing) must be
+   * supplied directly in each row — this is for callback-light models
+   * (bulk-seeding, imports), not a drop-in replacement for looping `create()`.
+   * Each row's values are still passed through `castForWrite`, so a
+   * caster-backed column (`json`, `encryptedCaster`) is written correctly.
+   * Returns the number of rows given, not a driver-reported count — unlike
+   * update/delete, a bulk insert either fully succeeds or throws.
+   */
+  static async insertAll<T extends typeof Model>(
+    this: T,
+    rows: Array<Partial<AttributesOf<InstanceType<T>>>>
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    await this.query().insert(rows.map((row) => castConditions(this, row as Record<string, any>)));
+    return rows.length;
+  }
+
   /** Convenience alias for the standalone transaction() function — see its docs. */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return transaction(fn);
