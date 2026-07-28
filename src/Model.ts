@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Knex } from 'knex';
 import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
-import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn } from './decorators';
+import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn, STI_TYPE_COLUMN, stiTargetFor } from './decorators';
 import { resolveCaster } from './casters';
 import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
@@ -121,8 +121,16 @@ export class Model extends AttributeModel {
     return new QueryChain(this, this.query());
   }
 
+  /**
+   * Instantiates the right class for `row`: `this` in the common case, but
+   * for single-table inheritance — when `row`'s type column names a subclass
+   * `@STI` registered against `this` (or an ancestor of it, e.g. querying
+   * the table-owning base class directly) — that subclass instead. See
+   * `@STI` in decorators.ts for how the registry gets populated.
+   */
   static fromRow<T extends typeof Model>(this: T, row: Record<string, any>): InstanceType<T> {
-    const instance = new (this as any)() as InstanceType<T>;
+    const target = stiTargetFor(this, row[STI_TYPE_COLUMN]) ?? this;
+    const instance = new (target as any)() as InstanceType<T>;
     instance.assignRow(row);
     (instance as any)[PERSISTED] = true;
     instance.snapshotAttributes();
