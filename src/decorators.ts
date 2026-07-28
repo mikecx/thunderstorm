@@ -525,3 +525,86 @@ export function Enum(attribute: string, values: Record<string, number | string>)
     };
   };
 }
+
+/**
+ * The discriminator column single-table inheritance reads/writes — Rails'
+ * `inheritance_column`, hardcoded here rather than configurable (this
+ * library generally prefers a fixed convention over a config knob nobody
+ * asked for — see `LOCK_COLUMN`/`SOFT_DELETE_COLUMN` in Model.ts).
+ */
+export const STI_TYPE_COLUMN = 'type';
+
+/**
+ * Every class `@STI` has been applied to anywhere in a table's hierarchy,
+ * keyed by *every* ancestor up to (and including) the table-owning base
+ * class — not just the immediate parent — so looking this up from any class
+ * in the hierarchy (the base, or an intermediate undecorated subclass) finds
+ * every registered leaf. A `WeakMap` rather than metadata (unlike everything
+ * else in this file) because the mapping needs to be visible from an
+ * *ancestor's* lookup, and metadata can only be read starting from the class
+ * it's attached to or a descendant of it — there's no way to reach
+ * "downward" into a subclass's own metadata from here.
+ */
+const STI_TYPES = new WeakMap<typeof Model, Map<string, typeof Model>>();
+
+function registerSTIType(cls: typeof Model, typeName: string, subclass: typeof Model): void {
+  let types = STI_TYPES.get(cls);
+  if (!types) {
+    types = new Map();
+    STI_TYPES.set(cls, types);
+  }
+  types.set(typeName, subclass);
+}
+
+/** Looks up the subclass `@STI(typeValue)` registered for `cls`, if any — used by `Model.fromRow()`. */
+export function stiTargetFor(cls: typeof Model, typeValue: string | undefined): typeof Model | undefined {
+  if (typeValue == null) return undefined;
+  return STI_TYPES.get(cls)?.get(typeValue);
+}
+
+function ownsTableName(cls: any): boolean {
+  return Object.hasOwn(cls, 'tableName');
+}
+
+/**
+ * Single-table inheritance: `Car`/`Truck extends Vehicle` share `Vehicle`'s
+ * table, discriminated by a `type` column (`STI_TYPE_COLUMN`) the base class
+ * must declare itself with a real `@Column()` — mirroring the explicit
+ * `tableName` requirement, and the same "explicit string, never `ctor.name`"
+ * rule `belongsToPolymorphic`'s type map already established, so renaming a
+ * class can never silently orphan rows already written under the old name.
+ *
+ * `@STI('car')` on `Car`:
+ * - registers a `@DefaultScope` filtering `WHERE type = 'car'`, so
+ *   `Car.all()`/`Car.where()`/`Car.find()` only ever see cars, reusing the
+ *   same mechanism a user-authored `@DefaultScope` would (see its bullet in
+ *   AGENTS.md) rather than a bespoke filter;
+ * - overrides `type`'s column default to `'car'` for `Car` specifically, so
+ *   `Car.create({...})` stamps it automatically the same way any other
+ *   column default would;
+ * - registers `Car` into the ancestor->type->subclass map (`STI_TYPES`) so
+ *   `Vehicle.fromRow()` — reached via `Vehicle.all()`/`Vehicle.find()` on
+ *   the base class, seeing rows of every type mixed together — instantiates
+ *   each row as the correct subclass instead of always `Vehicle`.
+ *
+ * Only single-level hierarchies are supported (subclasses directly below
+ * the table-owning base class) — a `@STI`-decorated grandchild would inherit
+ * its parent's `@DefaultScope` type filter too (default scopes accumulate,
+ * they don't replace), ANDing two different `type` values together and
+ * matching nothing. Not solved here; keep STI hierarchies one level deep.
+ */
+export function STI(typeName: string) {
+  return function (target: any, context: ClassDecoratorContext): void {
+    ownDefaultScopes(context.metadata).push((qb) => qb.where(STI_TYPE_COLUMN, typeName));
+
+    const existing = ownColumns(context.metadata).get(STI_TYPE_COLUMN) ?? {};
+    ownColumns(context.metadata).set(STI_TYPE_COLUMN, { ...existing, default: typeName });
+
+    let ancestor = Object.getPrototypeOf(target);
+    while (ancestor && ancestor.name) {
+      registerSTIType(ancestor, typeName, target);
+      if (ownsTableName(ancestor)) break;
+      ancestor = Object.getPrototypeOf(ancestor);
+    }
+  };
+}

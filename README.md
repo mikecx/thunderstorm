@@ -52,6 +52,7 @@ Collapsed below by default — click a heading to expand it.
 - [Delegate](#delegate)
 - [Scopes](#scopes)
 - [Default scopes](#default-scopes)
+- [Single-table inheritance](#single-table-inheritance)
 - [Timestamps](#timestamps)
 - [Enums](#enums)
 - [SecurePassword](#securepassword)
@@ -301,6 +302,20 @@ await Session.insertAll([
 ```
 
 Like `deleteAll()`, this skips instantiation entirely — no defaults, no validations, and no `beforeSave`/`beforeCreate`/`afterCreate` callbacks run, so anything a model relies on one of those for (`Timestamped`'s `createdAt`/`updatedAt`, `SecureToken`'s token generation, `SecurePassword`'s hashing) must be supplied directly in each row. This makes it a good fit for callback-light models — bulk-seeding, imports — not a drop-in replacement for looping `create()`. Each row's values still pass through the same column casting as `create()`/`where()`, so a caster-backed column (`json`, `encryptedCaster`) is written correctly. Returns the number of rows given, not a driver-reported count — unlike update/delete, a bulk insert either fully succeeds or throws.
+
+`Model.upsertAll()` is `insertAll()`'s upsert sibling — one `INSERT ... ON CONFLICT DO UPDATE` statement instead of a read-then-write loop:
+
+```ts
+await Widget.upsertAll(
+  [
+    { sku: 'ABC', stock: 10 },
+    { sku: 'XYZ', stock: 5 },
+  ],
+  { conflictTarget: 'sku' } // must name a real unique index/constraint — see the migration below
+);
+```
+
+`conflictTarget` must name column(s) with a real unique index/constraint — same "pair with a DB constraint, this library won't create one for you" reasoning as `@Validates({ uniqueness })`. `merge` picks which columns get overwritten on a conflicting row; omit it to overwrite every column the insert supplied. Same tradeoffs as `insertAll()` otherwise (no defaults/validations/callbacks, returns `rows.length` not a driver-reported count).
 
 ### Row locking
 
@@ -801,6 +816,50 @@ await Post.unscoped(); // every post, archived or not
 ```
 
 Default scopes only reach read paths — `save()`/`destroy()`/`reload()` still operate directly by primary key, unscoped, since they're acting on a specific record the caller already holds a reference to, not running a general listing query.
+
+</details>
+
+<details>
+<summary>
+
+## Single-table inheritance
+
+</summary>
+
+`@STI(typeValue)` lets several subclasses share one table, discriminated by a `type` column the base class declares itself:
+
+```ts
+import { Model, Column, PrimaryKey, STI } from '@mikecx/thunderstorm';
+
+class Vehicle extends Model {
+  static tableName = 'vehicles';
+  @PrimaryKey() id!: number;
+  @Column() type!: string; // required — the STI discriminator column
+  @Column() make!: string;
+}
+
+@STI('car')
+class Car extends Vehicle {
+  @Column() doors!: number;
+}
+
+@STI('truck')
+class Truck extends Vehicle {
+  @Column() bedLength!: number;
+}
+
+const car = await Car.create({ make: 'Honda', doors: 4 });
+car.type; // 'car' — stamped automatically
+
+await Car.all(); // only cars
+await Vehicle.all(); // every vehicle, each instantiated as the right subclass (Car/Truck)
+```
+
+`@STI` is built on [`@DefaultScope`](#default-scopes): it registers a scope filtering by `type` (so a subclass's `all()`/`where()`/`find()` only ever see its own rows) and overrides the `type` column's default for that subclass, the same way any other `@Column({ default })` works. Querying the base class directly (`Vehicle.all()`) returns rows of every type, each instantiated as its actual subclass rather than always `Vehicle`.
+
+The `type` value is always an explicit string you choose (`@STI('car')`), never inferred from the class name — the same rule [polymorphic associations'](#polymorphic-associations) type map already follows, so renaming a class can never silently orphan rows already written under the old name.
+
+Only single-level hierarchies are supported — a subclass of a `@STI`-decorated class would inherit its default scope's type filter too (default scopes accumulate, they don't replace), which isn't what you want for a deeper hierarchy. Keep `@STI` one level below the table-owning base class.
 
 </details>
 

@@ -21,6 +21,8 @@ export {
   SecurePassword,
   SecureToken,
   DefaultScope,
+  STI,
+  STI_TYPE_COLUMN,
 } from './decorators';
 export type { ColumnOptions, ValidationRule, CallbackType, ScopeFn } from './decorators';
 export { Errors, RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';

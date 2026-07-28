@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Knex } from 'knex';
 import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
-import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn } from './decorators';
+import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn, STI_TYPE_COLUMN, stiTargetFor } from './decorators';
 import { resolveCaster } from './casters';
 import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
@@ -121,8 +121,16 @@ export class Model extends AttributeModel {
     return new QueryChain(this, this.query());
   }
 
+  /**
+   * Instantiates the right class for `row`: `this` in the common case, but
+   * for single-table inheritance — when `row`'s type column names a subclass
+   * `@STI` registered against `this` (or an ancestor of it, e.g. querying
+   * the table-owning base class directly) — that subclass instead. See
+   * `@STI` in decorators.ts for how the registry gets populated.
+   */
   static fromRow<T extends typeof Model>(this: T, row: Record<string, any>): InstanceType<T> {
-    const instance = new (this as any)() as InstanceType<T>;
+    const target = stiTargetFor(this, row[STI_TYPE_COLUMN]) ?? this;
+    const instance = new (target as any)() as InstanceType<T>;
     instance.assignRow(row);
     (instance as any)[PERSISTED] = true;
     instance.snapshotAttributes();
@@ -239,6 +247,34 @@ export class Model extends AttributeModel {
   ): Promise<number> {
     if (rows.length === 0) return 0;
     await this.query().insert(rows.map((row) => castConditions(this, row as Record<string, any>)));
+    return rows.length;
+  }
+
+  /**
+   * `insertAll()`'s upsert sibling: a single `INSERT ... ON CONFLICT
+   * (conflictTarget) DO UPDATE` statement (Rails' `upsert_all(attributes,
+   * unique_by:)`) rather than a `firstOrCreate`-style read-then-write loop.
+   * `conflictTarget` must name a real unique index/constraint on those
+   * columns — same "pair with a DB constraint, this library won't create
+   * one for you" reasoning as `associate()`/`@Validates({ uniqueness })`
+   * elsewhere. `merge` picks which columns get overwritten on a conflicting
+   * row; omit it to overwrite every column the insert supplied (Knex's
+   * `.merge()` with no arguments). Same tradeoffs as `insertAll()`
+   * otherwise: no defaults, validations, or callbacks run, each row's
+   * values are still passed through `castForWrite`, and the return value is
+   * `rows.length`, not a driver-reported count.
+   */
+  static async upsertAll<T extends typeof Model>(
+    this: T,
+    rows: Array<Partial<AttributesOf<InstanceType<T>>>>,
+    options: { conflictTarget: string | string[]; merge?: string[] }
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    const casted = rows.map((row) => castConditions(this, row as Record<string, any>));
+    const onConflict = this.query()
+      .insert(casted)
+      .onConflict(options.conflictTarget as any);
+    await (options.merge ? onConflict.merge(options.merge) : onConflict.merge());
     return rows.length;
   }
 
