@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Errors, RecordInvalid } from './errors';
+import { Errors, RecordInvalid, StaleObjectError } from './errors';
 
 describe('Errors', () => {
   it('starts empty', () => {
@@ -42,5 +42,14 @@ describe('RecordInvalid', () => {
     expect(err.name).toBe('RecordInvalid');
     expect(err.message).toContain("name can't be blank");
     expect(err.record.errors).toBe(errors);
+  });
+});
+
+describe('StaleObjectError', () => {
+  it('carries the record it was thrown for', () => {
+    const record = { id: 1 };
+    const err = new StaleObjectError(record);
+    expect(err.name).toBe('StaleObjectError');
+    expect(err.record).toBe(record);
   });
 });

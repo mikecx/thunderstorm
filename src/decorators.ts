@@ -292,6 +292,29 @@ export function Timestamped<TBase extends ModelConstructor>(
 }
 
 /**
+ * Mixin adding optimistic locking, mirroring `ActiveRecord::Locking::Optimistic`:
+ * a `lockVersion` column (default `0`), checked and incremented by
+ * `Model.save()`/`destroy()` themselves rather than by a callback here — a
+ * callback can bump the in-memory value, but only the UPDATE/DELETE's own
+ * `WHERE lockVersion = ...` clause and affected-row count can actually
+ * detect that someone else changed the record first, so that logic has to
+ * live in the query itself, not in this mixin. See `Model.save()`'s doc
+ * comment and `StaleObjectError`.
+ */
+export function Lockable<TBase extends ModelConstructor>(
+  Base: TBase
+): TBase & (new (...args: any[]) => { lockVersion: number }) {
+  class WithLocking extends Base {
+    lockVersion!: number;
+  }
+
+  const metadata = ownClassMetadata(WithLocking);
+  ownColumns(metadata).set('lockVersion', { type: 'number', default: 0 });
+
+  return WithLocking;
+}
+
+/**
  * Mixin adding password authentication, mirroring `has_secure_password`:
  * hardcoded columns `password` (virtual), `passwordConfirmation` (virtual),
  * `passwordDigest` (real, `guarded` so it can never come from mass-assigned

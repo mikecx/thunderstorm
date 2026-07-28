@@ -55,6 +55,7 @@ Collapsed below by default — click a heading to expand it.
 - [Enums](#enums)
 - [SecurePassword](#securepassword)
 - [SecureToken](#securetoken)
+- [Optimistic locking](#optimistic-locking)
 - [File attachments](#file-attachments)
 - [Dependent records on destroy](#dependent-records-on-destroy)
 - [Transactions](#transactions)
@@ -834,6 +835,36 @@ await key.regenerateToken(); // replaces and persists a new token
 ```
 
 `token` is `guarded`, same reasoning as `passwordDigest` — it's server-generated, never something that should arrive via mass-assigned input or leak into a default API response.
+
+</details>
+
+<details>
+<summary>
+
+## Optimistic locking
+
+</summary>
+
+`Lockable(Base)` adds a `lockVersion` column (starts at `0`) and mirrors `ActiveRecord::Locking::Optimistic`: `save()`/`update()`/`destroy()` include `WHERE lockVersion = ...` and throw `StaleObjectError` if zero rows were affected — someone else changed or deleted the record first.
+
+```ts
+class Post extends Lockable(Model) {
+  static tableName = 'posts';
+  @PrimaryKey() id!: number;
+  @Column() title!: string;
+}
+
+const post = await Post.create({ title: 'Draft' });
+const staleCopy = await Post.find(post.id);
+
+await post.update({ title: 'Published' }); // lockVersion 0 -> 1
+
+await staleCopy!.update({ title: 'Also published' }); // throws StaleObjectError — staleCopy is still at lockVersion 0
+```
+
+Unlike a normal validation failure, `StaleObjectError` is thrown rather than reported via `errors`/a `false` return — even from plain `save()`/`update()`, not just the `*OrFail()` variants — since a lost race isn't safe to silently ignore. Catch it where you can meaningfully recover (reload and retry, surface a conflict to the user).
+
+`Model.insertAll()`/`QueryChain.updateAll()`/`deleteAll()`/`destroyAll()` don't go through `save()`/`destroy()`, so they bypass the lock check entirely — same trade-off as skipping callbacks/validations.
 
 </details>
 
