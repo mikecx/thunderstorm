@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import knexFactory, { Knex } from 'knex';
 import { Model, connect } from './Model';
 import { Column, PrimaryKey } from './decorators';
@@ -76,7 +76,16 @@ describe('logQueries', () => {
   });
 
   it('falls back to a default console formatter when none is given', async () => {
+    // Spied rather than left to actually print — the point is to verify the
+    // fallback runs and formats sensibly, not to spam real test output.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
     expect(() => logQueries(knex)).not.toThrow();
     await expect(Widget.create({ name: 'Defaulted' } as any)).resolves.toBeDefined();
+
+    const insertLine = logSpy.mock.calls.map(([line]) => line).find((line) => /insert/i.test(line));
+    expect(insertLine).toMatch(/^\(\d+\.\d+ms\).*insert.*widgets/i);
+
+    logSpy.mockRestore();
   });
 });
