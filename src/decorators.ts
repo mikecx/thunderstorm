@@ -1,3 +1,4 @@
+import type { Knex } from 'knex';
 import type { Caster, ColumnType } from './casters';
 import type { Model } from './Model';
 import { generateToken, hashPassword, verifyPassword } from './security';
@@ -162,6 +163,30 @@ export const AfterUpdate = () => registerCallback('afterUpdate');
 export const BeforeDestroy = () => registerCallback('beforeDestroy');
 export const AfterDestroy = () => registerCallback('afterDestroy');
 
+export type ScopeFn = (qb: Knex.QueryBuilder) => Knex.QueryBuilder;
+
+export const DEFAULT_SCOPES = Symbol('defaultScopes');
+
+/**
+ * Registers a query modifier that's automatically applied to every read —
+ * `find`/`all`/`where`/`findInBatches`/associations/preloads — unless the
+ * caller opts out via `Model.unscoped()`. Stacks (ANDed together) like
+ * `@Validates`, and inherits-then-accumulates down subclasses the same way
+ * `@Column`/`@Validates` do (see `ownMetadataMap`), so a subclass can add its
+ * own `@DefaultScope` on top of an inherited one without losing it.
+ *
+ * Deliberately only reaches the read paths, not `save()`/`destroy()`'s own
+ * queries — those already target a specific loaded record by primary key, so
+ * scoping them the same way `all()`/`where()` are risks silently blocking a
+ * write on a record the caller explicitly holds a reference to (see
+ * `SoftDelete`'s `restore()`, which needs to reach an already-excluded row).
+ */
+export function DefaultScope(scope: ScopeFn) {
+  return function (_target: any, context: ClassDecoratorContext): void {
+    ownDefaultScopes(context.metadata).push(scope);
+  };
+}
+
 function capitalize(word: string): string {
   return word.length === 0 ? word : word[0].toUpperCase() + word.slice(1);
 }
@@ -206,6 +231,19 @@ export function ownCallbackList(metadata: DecoratorMetadata, type: CallbackType)
 
 export function ownColumns(metadata: DecoratorMetadata): Map<string, ColumnOptions> {
   return ownMetadataMap<string, ColumnOptions>(metadata, COLUMNS, (options) => ({ ...options }));
+}
+
+/**
+ * Exported for the same reason as `ownCallbackList` — other in-package macros
+ * that need an automatically-applied query filter (e.g. single-table
+ * inheritance's per-subclass type filter) can register one the same way,
+ * instead of hand-rolling their own metadata storage.
+ */
+export function ownDefaultScopes(metadata: DecoratorMetadata): ScopeFn[] {
+  const map = ownMetadataMap<'scopes', ScopeFn[]>(metadata, DEFAULT_SCOPES, (fns) => [...fns]);
+  const list = map.get('scopes') ?? [];
+  map.set('scopes', list);
+  return list;
 }
 
 function ownValidationList(metadata: DecoratorMetadata, attribute: string): ValidationRule[] {
