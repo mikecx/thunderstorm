@@ -52,11 +52,13 @@ Collapsed below by default — click a heading to expand it.
 - [Delegate](#delegate)
 - [Scopes](#scopes)
 - [Default scopes](#default-scopes)
+- [Single-table inheritance](#single-table-inheritance)
 - [Timestamps](#timestamps)
 - [Enums](#enums)
 - [SecurePassword](#securepassword)
 - [SecureToken](#securetoken)
 - [Optimistic locking](#optimistic-locking)
+- [Soft delete](#soft-delete)
 - [File attachments](#file-attachments)
 - [Dependent records on destroy](#dependent-records-on-destroy)
 - [Counter cache](#counter-cache)
@@ -301,6 +303,20 @@ await Session.insertAll([
 
 Like `deleteAll()`, this skips instantiation entirely — no defaults, no validations, and no `beforeSave`/`beforeCreate`/`afterCreate` callbacks run, so anything a model relies on one of those for (`Timestamped`'s `createdAt`/`updatedAt`, `SecureToken`'s token generation, `SecurePassword`'s hashing) must be supplied directly in each row. This makes it a good fit for callback-light models — bulk-seeding, imports — not a drop-in replacement for looping `create()`. Each row's values still pass through the same column casting as `create()`/`where()`, so a caster-backed column (`json`, `encryptedCaster`) is written correctly. Returns the number of rows given, not a driver-reported count — unlike update/delete, a bulk insert either fully succeeds or throws.
 
+`Model.upsertAll()` is `insertAll()`'s upsert sibling — one `INSERT ... ON CONFLICT DO UPDATE` statement instead of a read-then-write loop:
+
+```ts
+await Widget.upsertAll(
+  [
+    { sku: 'ABC', stock: 10 },
+    { sku: 'XYZ', stock: 5 },
+  ],
+  { conflictTarget: 'sku' } // must name a real unique index/constraint — see the migration below
+);
+```
+
+`conflictTarget` must name column(s) with a real unique index/constraint — same "pair with a DB constraint, this library won't create one for you" reasoning as `@Validates({ uniqueness })`. `merge` picks which columns get overwritten on a conflicting row; omit it to overwrite every column the insert supplied. Same tradeoffs as `insertAll()` otherwise (no defaults/validations/callbacks, returns `rows.length` not a driver-reported count).
+
 ### Row locking
 
 `.lock()` is pessimistic locking — `SELECT ... FOR UPDATE` (default) or `.lock('share')` for `FOR SHARE` — a thin wrapper over Knex's own `.forUpdate()`/`.forShare()`. Only meaningful inside `transaction()`: Postgres/MySQL hold the lock until the surrounding transaction commits or rolls back, so use it to serialize concurrent access to a row while you read-then-write it:
@@ -428,6 +444,15 @@ class Post extends Model {
 
 - `hasMany` returns a `QueryChain` — `await user.posts()`, or scope it first: `user.posts().order('title', 'asc').first()`.
 - `hasOne`/`belongsTo` return a `Promise` directly — `await post.author()`.
+
+`hasOne`/`belongsTo` (and their polymorphic equivalents) are memoized per instance: calling `post.author()` twice only queries once.
+
+```ts
+await post.author(); // queries
+await post.author(); // cached — no query
+```
+
+Pass `{ reload: true }` to force a fresh load for one call, or call `record.reload()` to clear every cached association on that instance at once (along with its own attributes). `hasMany`/`hasManyThrough`/`hasAndBelongsToMany`/`hasManyPolymorphic` are **not** memoized — they return a `QueryChain`, and staying lazy/chainable (`user.posts().where(...)`) is more valuable than caching here, since `QueryChain.where()` mutates the chain in place rather than returning a copy, so a cached chain could get silently corrupted by an unrelated caller's further scoping.
 
 See [Many-to-many associations](#many-to-many-associations) and [Polymorphic associations](#polymorphic-associations) below for the less-common shapes.
 
@@ -806,6 +831,50 @@ Default scopes only reach read paths — `save()`/`destroy()`/`reload()` still o
 <details>
 <summary>
 
+## Single-table inheritance
+
+</summary>
+
+`@STI(typeValue)` lets several subclasses share one table, discriminated by a `type` column the base class declares itself:
+
+```ts
+import { Model, Column, PrimaryKey, STI } from '@mikecx/thunderstorm';
+
+class Vehicle extends Model {
+  static tableName = 'vehicles';
+  @PrimaryKey() id!: number;
+  @Column() type!: string; // required — the STI discriminator column
+  @Column() make!: string;
+}
+
+@STI('car')
+class Car extends Vehicle {
+  @Column() doors!: number;
+}
+
+@STI('truck')
+class Truck extends Vehicle {
+  @Column() bedLength!: number;
+}
+
+const car = await Car.create({ make: 'Honda', doors: 4 });
+car.type; // 'car' — stamped automatically
+
+await Car.all(); // only cars
+await Vehicle.all(); // every vehicle, each instantiated as the right subclass (Car/Truck)
+```
+
+`@STI` is built on [`@DefaultScope`](#default-scopes): it registers a scope filtering by `type` (so a subclass's `all()`/`where()`/`find()` only ever see its own rows) and overrides the `type` column's default for that subclass, the same way any other `@Column({ default })` works. Querying the base class directly (`Vehicle.all()`) returns rows of every type, each instantiated as its actual subclass rather than always `Vehicle`.
+
+The `type` value is always an explicit string you choose (`@STI('car')`), never inferred from the class name — the same rule [polymorphic associations'](#polymorphic-associations) type map already follows, so renaming a class can never silently orphan rows already written under the old name.
+
+Only single-level hierarchies are supported — a subclass of a `@STI`-decorated class would inherit its default scope's type filter too (default scopes accumulate, they don't replace), which isn't what you want for a deeper hierarchy. Keep `@STI` one level below the table-owning base class.
+
+</details>
+
+<details>
+<summary>
+
 ## Timestamps
 
 </summary>
@@ -934,6 +1003,40 @@ await staleCopy!.update({ title: 'Also published' }); // throws StaleObjectError
 Unlike a normal validation failure, `StaleObjectError` is thrown rather than reported via `errors`/a `false` return — even from plain `save()`/`update()`, not just the `*OrFail()` variants — since a lost race isn't safe to silently ignore. Catch it where you can meaningfully recover (reload and retry, surface a conflict to the user).
 
 `Model.insertAll()`/`QueryChain.updateAll()`/`deleteAll()`/`destroyAll()` don't go through `save()`/`destroy()`, so they bypass the lock check entirely — same trade-off as skipping callbacks/validations.
+
+</details>
+
+<details>
+<summary>
+
+## Soft delete
+
+</summary>
+
+`SoftDelete(Base)` adds a `deletedAt` column and a [default scope](#default-scopes) excluding non-null rows, mirroring gems like `paranoia`/`discard`: `destroy()` on a soft-deletable model does an UPDATE setting `deletedAt` instead of a DELETE, still running `beforeDestroy`/`afterDestroy` callbacks around it — the row stays in the table, just invisible to normal reads.
+
+```ts
+class Post extends SoftDelete(Model) {
+  static tableName = 'posts';
+  @PrimaryKey() id!: number;
+  @Column() title!: string;
+}
+
+const post = await Post.create({ title: 'Draft' });
+await post.destroy();
+
+await Post.find(post.id); // undefined — excluded by the default scope
+post.isPersisted; // true — the row still exists
+post.isDeleted; // true
+
+const trashed = (await Post.unscoped()).find((p) => p.id === post.id)!;
+await trashed.restore(); // clears deletedAt
+await Post.find(post.id); // back
+```
+
+`restore()`/`isDeleted` are always present on every `Model` (like `reload()`), a no-op/`false`/throwing guard on a model without a `deletedAt` column rather than something only added by the mixin — the same convention `Lockable`'s checks already follow. `restore()` doesn't run callbacks or go through the `Lockable` check, the same documented simplification `insertAll()`/`deleteAll()` already make elsewhere.
+
+Since it's built on `@DefaultScope`, `SoftDelete` composes with everything that mechanism reaches — a soft-deleted record disappears from `where()`-based associations and preloads too, not just `find`/`all`.
 
 </details>
 

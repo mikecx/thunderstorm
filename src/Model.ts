@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Knex } from 'knex';
 import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
-import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn } from './decorators';
+import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn, STI_TYPE_COLUMN, stiTargetFor } from './decorators';
 import { resolveCaster } from './casters';
 import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
@@ -42,6 +42,7 @@ export async function transaction<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const PERSISTED = Symbol('persisted');
+const ASSOCIATION_CACHE = Symbol('associationCache');
 
 /**
  * Optimistic locking is enabled by convention — a declared `lockVersion`
@@ -55,6 +56,17 @@ const PERSISTED = Symbol('persisted');
 const LOCK_COLUMN = 'lockVersion';
 
 /**
+ * Soft delete is enabled by the same convention `Lockable` uses — a declared
+ * `deletedAt` column (see the `SoftDelete` mixin in decorators.ts) — rather
+ * than a decorator or opt-in flag. `destroy()` checks for this column
+ * directly and, when present, does an UPDATE setting it instead of a DELETE,
+ * while still running the usual beforeDestroy/afterDestroy callbacks around
+ * it. `SoftDelete` also registers a `@DefaultScope` excluding non-null rows,
+ * so a soft-deleted record is invisible to normal reads until `restore()`d.
+ */
+const SOFT_DELETE_COLUMN = 'deletedAt';
+
+/**
  * The ActiveRecord-equivalent layer: extends AttributeModel (attributes,
  * validations, dirty tracking, serialization — see AttributeModel.ts) with
  * persistence, querying, associations, and lifecycle callbacks.
@@ -63,6 +75,33 @@ export class Model extends AttributeModel {
   static tableName: string;
 
   private [PERSISTED] = false;
+  private [ASSOCIATION_CACHE]?: Map<string, Promise<any>>;
+
+  /**
+   * Memoizes a single-record association load (`hasOne`/`belongsTo`/
+   * `hasOnePolymorphic`/`belongsToPolymorphic`) per instance, so calling the
+   * same association method twice on the same record only queries once —
+   * mirroring Rails' association caching. `key` identifies the association
+   * by its shape (which method, `target`, foreign key) rather than by the
+   * caller's own wrapper method name, since that name isn't visible at this
+   * layer; two differently-named wrapper methods with the same target and
+   * foreign key share a cache entry, which is an acceptable, unusual edge
+   * case rather than something worth solving here. A failed load isn't
+   * cached, so the next call retries instead of replaying the rejection
+   * forever. Deliberately not used by the `hasMany`-family methods — see
+   * their comment below.
+   */
+  private memoizeAssociation<R>(key: string, reload: boolean | undefined, load: () => Promise<R>): Promise<R> {
+    const cache = (this[ASSOCIATION_CACHE] ??= new Map());
+    if (!reload && cache.has(key)) return cache.get(key) as Promise<R>;
+
+    const promise = load().catch((err) => {
+      cache.delete(key);
+      throw err;
+    });
+    cache.set(key, promise);
+    return promise;
+  }
 
   static callbacksFor(type: CallbackType): string[] {
     return (this as any)[Symbol.metadata]?.[CALLBACKS]?.get(type) ?? [];
@@ -110,8 +149,16 @@ export class Model extends AttributeModel {
     return new QueryChain(this, this.query());
   }
 
+  /**
+   * Instantiates the right class for `row`: `this` in the common case, but
+   * for single-table inheritance — when `row`'s type column names a subclass
+   * `@STI` registered against `this` (or an ancestor of it, e.g. querying
+   * the table-owning base class directly) — that subclass instead. See
+   * `@STI` in decorators.ts for how the registry gets populated.
+   */
   static fromRow<T extends typeof Model>(this: T, row: Record<string, any>): InstanceType<T> {
-    const instance = new (this as any)() as InstanceType<T>;
+    const target = stiTargetFor(this, row[STI_TYPE_COLUMN]) ?? this;
+    const instance = new (target as any)() as InstanceType<T>;
     instance.assignRow(row);
     (instance as any)[PERSISTED] = true;
     instance.snapshotAttributes();
@@ -231,6 +278,34 @@ export class Model extends AttributeModel {
     return rows.length;
   }
 
+  /**
+   * `insertAll()`'s upsert sibling: a single `INSERT ... ON CONFLICT
+   * (conflictTarget) DO UPDATE` statement (Rails' `upsert_all(attributes,
+   * unique_by:)`) rather than a `firstOrCreate`-style read-then-write loop.
+   * `conflictTarget` must name a real unique index/constraint on those
+   * columns — same "pair with a DB constraint, this library won't create
+   * one for you" reasoning as `associate()`/`@Validates({ uniqueness })`
+   * elsewhere. `merge` picks which columns get overwritten on a conflicting
+   * row; omit it to overwrite every column the insert supplied (Knex's
+   * `.merge()` with no arguments). Same tradeoffs as `insertAll()`
+   * otherwise: no defaults, validations, or callbacks run, each row's
+   * values are still passed through `castForWrite`, and the return value is
+   * `rows.length`, not a driver-reported count.
+   */
+  static async upsertAll<T extends typeof Model>(
+    this: T,
+    rows: Array<Partial<AttributesOf<InstanceType<T>>>>,
+    options: { conflictTarget: string | string[]; merge?: string[] }
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    const casted = rows.map((row) => castConditions(this, row as Record<string, any>));
+    const onConflict = this.query()
+      .insert(casted)
+      .onConflict(options.conflictTarget as any);
+    await (options.merge ? onConflict.merge(options.merge) : onConflict.merge());
+    return rows.length;
+  }
+
   /** Convenience alias for the standalone transaction() function — see its docs. */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return transaction(fn);
@@ -244,8 +319,22 @@ export class Model extends AttributeModel {
   // import — even a circular one between two model files — is safe. Only a
   // *class-body* reference (a static field initializer, a decorator argument)
   // would need a thunk to dodge module load order.
+  //
+  // The QueryChain-returning methods below (hasMany, hasManyThrough,
+  // hasAndBelongsToMany, hasManyPolymorphic) are deliberately NOT memoized,
+  // unlike hasOne/belongsTo/*Polymorphic further down: QueryChain.where()
+  // mutates its own `qb` in place and returns `this` rather than a copy, so
+  // caching and handing back the same QueryChain instance across calls would
+  // let one caller's `.where(...)`/`.order(...)` chaining silently corrupt
+  // what a later, unrelated call to the same association sees. Staying
+  // lazy/chainable (see the hasManyThrough doc comment) and staying safely
+  // memoizable are in tension here; this library picks the former, the same
+  // choice Rails' own collection-proxy semantics make (chaining an
+  // association always issues a fresh, uncached query; only a bare,
+  // unchained access is memoized) — just without reimplementing a proxy to
+  // get there.
 
-  /** One-to-many: rows in `target` whose `foreignKey` equals this record's primary key (or `localKey`). */
+  /** One-to-many: rows in `target` whose `foreignKey` equals this record's primary key (or `localKey`). Not memoized — see the comment above. */
   protected hasMany<T extends typeof Model>(
     target: T,
     options: { foreignKey: string; localKey?: string }
@@ -254,23 +343,33 @@ export class Model extends AttributeModel {
     return target.where({ [options.foreignKey]: getAttr(this, localKey) } as Partial<AttributesOf<InstanceType<T>>>);
   }
 
-  /** One-to-one, owning side: the single row in `target` whose `foreignKey` equals this record's primary key. */
+  /**
+   * One-to-one, owning side: the single row in `target` whose `foreignKey`
+   * equals this record's primary key. Memoized per instance — a second call
+   * with the same `target`/`foreignKey` returns the same in-flight/resolved
+   * promise without re-querying; pass `{ reload: true }` to force a fresh
+   * load, or call `reload()` to clear every cached association at once.
+   */
   protected hasOne<T extends typeof Model>(
     target: T,
-    options: { foreignKey: string; localKey?: string }
+    options: { foreignKey: string; localKey?: string; reload?: boolean }
   ): Promise<InstanceType<T> | undefined> {
-    const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
-    return target
-      .where({ [options.foreignKey]: getAttr(this, localKey) } as Partial<AttributesOf<InstanceType<T>>>)
-      .first();
+    const key = `hasOne:${target.name}:${options.foreignKey}`;
+    return this.memoizeAssociation(key, options.reload, () => {
+      const localKey = options.localKey ?? (this.constructor as typeof Model).primaryKey;
+      return target
+        .where({ [options.foreignKey]: getAttr(this, localKey) } as Partial<AttributesOf<InstanceType<T>>>)
+        .first();
+    });
   }
 
-  /** Inverse of hasMany/hasOne: the single row in `target` referenced by this record's `foreignKey` column. */
+  /** Inverse of hasMany/hasOne: the single row in `target` referenced by this record's `foreignKey` column. Memoized — see `hasOne`'s doc comment. */
   protected belongsTo<T extends typeof Model>(
     target: T,
-    options: { foreignKey: string }
+    options: { foreignKey: string; reload?: boolean }
   ): Promise<InstanceType<T> | undefined> {
-    return target.find(getAttr(this, options.foreignKey));
+    const key = `belongsTo:${target.name}:${options.foreignKey}`;
+    return this.memoizeAssociation(key, options.reload, () => target.find(getAttr(this, options.foreignKey)));
   }
 
   /**
@@ -352,16 +451,21 @@ export class Model extends AttributeModel {
    * deliberately explicit rather than inferring a class name (`ctor.name`)
    * the way Rails defaults to, so renaming a model class can never silently
    * orphan every row that already references it under the old name.
+   * Memoized per instance — see `hasOne`'s doc comment; `{ reload: true }`
+   * forces a fresh load.
    */
   protected belongsToPolymorphic<TTypes extends Record<string, typeof Model>>(
-    options: { idField: string; typeField: string },
+    options: { idField: string; typeField: string; reload?: boolean },
     types: TTypes
   ): Promise<InstanceType<TTypes[keyof TTypes]> | undefined> {
-    const type = getAttr(this, options.typeField);
-    const id = getAttr(this, options.idField);
-    const target = types[type];
-    if (!target || id == null) return Promise.resolve(undefined);
-    return target.find(id) as Promise<InstanceType<TTypes[keyof TTypes]> | undefined>;
+    const key = `belongsToPolymorphic:${options.idField}:${options.typeField}`;
+    return this.memoizeAssociation(key, options.reload, () => {
+      const type = getAttr(this, options.typeField);
+      const id = getAttr(this, options.idField);
+      const target = types[type];
+      if (!target || id == null) return Promise.resolve(undefined);
+      return target.find(id) as Promise<InstanceType<TTypes[keyof TTypes]> | undefined>;
+    });
   }
 
   /**
@@ -369,7 +473,7 @@ export class Model extends AttributeModel {
    * `Post`'s comments, where `Comment.commentableType` must also match
    * `typeValue` (the same stable string passed to `belongsToPolymorphic`'s
    * `types` map on the `Comment` side) so a comment on a `Photo` with the
-   * same id never leaks in.
+   * same id never leaks in. Not memoized — same reasoning as `hasMany`.
    */
   protected hasManyPolymorphic<T extends typeof Model>(
     target: T,
@@ -382,12 +486,19 @@ export class Model extends AttributeModel {
     } as Partial<AttributesOf<InstanceType<T>>>);
   }
 
-  /** One-to-one flavor of `hasManyPolymorphic` — same filter, first match only. */
+  /**
+   * One-to-one flavor of `hasManyPolymorphic` — same filter, first match
+   * only. Memoized per instance — see `hasOne`'s doc comment; `{ reload:
+   * true }` forces a fresh load. Delegates the actual query to
+   * `hasManyPolymorphic` (itself unmemoized), memoizing only the awaited
+   * result of `.first()`.
+   */
   protected hasOnePolymorphic<T extends typeof Model>(
     target: T,
-    options: { idField: string; typeField: string; typeValue: string; localKey?: string }
+    options: { idField: string; typeField: string; typeValue: string; localKey?: string; reload?: boolean }
   ): Promise<InstanceType<T> | undefined> {
-    return this.hasManyPolymorphic(target, options).first();
+    const key = `hasOnePolymorphic:${target.name}:${options.idField}:${options.typeField}:${options.typeValue}`;
+    return this.memoizeAssociation(key, options.reload, () => this.hasManyPolymorphic(target, options).first());
   }
 
   /**
@@ -632,10 +743,13 @@ export class Model extends AttributeModel {
 
   /**
    * Discards unsaved in-memory changes by re-fetching the row from the
-   * database. Deliberately unscoped — it's re-fetching a record the caller
-   * already holds a handle to by primary key, not running a general listing
-   * query, so a `@DefaultScope` that would otherwise exclude it (e.g. after
-   * soft-deleting this same instance) shouldn't make `reload()` throw.
+   * database, and clears every cached `hasOne`/`belongsTo`/`*Polymorphic`
+   * association (see `memoizeAssociation`) so the next access re-queries
+   * instead of returning stale, pre-reload results. Deliberately unscoped —
+   * it's re-fetching a record the caller already holds a handle to by
+   * primary key, not running a general listing query, so a `@DefaultScope`
+   * that would otherwise exclude it (e.g. after soft-deleting this same
+   * instance) shouldn't make `reload()` throw.
    */
   async reload(): Promise<this> {
     const ctor = this.constructor as typeof Model;
@@ -644,6 +758,7 @@ export class Model extends AttributeModel {
     if (!row) {
       throw new Error(`Can't reload: no ${ctor.name} found with ${pk} = ${getAttr(this, pk)}`);
     }
+    this[ASSOCIATION_CACHE]?.clear();
     this.assignRow(row);
     this.snapshotAttributes();
     return this;
@@ -727,7 +842,10 @@ export class Model extends AttributeModel {
    * Returns false — without deleting — if a beforeDestroy callback aborts
    * the chain. Throws StaleObjectError (not a normal false return) if the
    * record is optimistically locked and someone else already changed or
-   * deleted it — see `Lockable`/`save()`.
+   * deleted it — see `Lockable`/`save()`. On a `SoftDelete`-mixed-in model,
+   * this sets `deletedAt` via an UPDATE instead of issuing a DELETE — the
+   * row still physically exists, so `isPersisted` stays `true` and a
+   * subsequent `save()` still does an UPDATE, not a re-INSERT.
    */
   async destroy(): Promise<boolean> {
     if (!(await this.runCallbacks('beforeDestroy'))) return false;
@@ -738,13 +856,56 @@ export class Model extends AttributeModel {
     const isLockable = ctor.columns.has(LOCK_COLUMN);
     if (isLockable) qb = qb.where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, getAttr(this, LOCK_COLUMN)));
 
-    const affected = await qb.delete();
-    if (isLockable && affected === 0) throw new StaleObjectError(this);
-
-    this[PERSISTED] = false;
+    const isSoftDeletable = ctor.columns.has(SOFT_DELETE_COLUMN);
+    let affected: number;
+    if (isSoftDeletable) {
+      const deletedAt = new Date();
+      affected = await qb.update({ [SOFT_DELETE_COLUMN]: ctor.castForWrite(SOFT_DELETE_COLUMN, deletedAt) });
+      if (isLockable && affected === 0) throw new StaleObjectError(this);
+      if (affected > 0) {
+        setAttr(this, SOFT_DELETE_COLUMN, deletedAt);
+        this.snapshotAttributes();
+      }
+    } else {
+      affected = await qb.delete();
+      if (isLockable && affected === 0) throw new StaleObjectError(this);
+      this[PERSISTED] = false;
+    }
 
     await this.runCallbacks('afterDestroy');
     return true;
+  }
+
+  /**
+   * Un-soft-deletes this record by clearing `deletedAt`, the inverse of a
+   * `SoftDelete`-aware `destroy()`. Throws if the model has no `deletedAt`
+   * column — there's nothing to restore. Targets this record directly by
+   * primary key like `destroy()` does, so it works on an instance loaded via
+   * `Model.unscoped()` (a plain `find()`/`all()`/`where()` won't surface a
+   * soft-deleted row in the first place, since `SoftDelete` registers a
+   * `@DefaultScope` excluding it). Doesn't run callbacks or go through the
+   * `Lockable` check — same documented simplification `insertAll()`/
+   * `deleteAll()` already make elsewhere in this library.
+   */
+  async restore(): Promise<boolean> {
+    const ctor = this.constructor as typeof Model;
+    if (!ctor.columns.has(SOFT_DELETE_COLUMN)) {
+      throw new Error(`${ctor.name} is not soft-deletable (no ${SOFT_DELETE_COLUMN} column).`);
+    }
+    const pk = ctor.primaryKey;
+    await ctor
+      .query()
+      .where(pk, getAttr(this, pk))
+      .update({ [SOFT_DELETE_COLUMN]: null });
+    setAttr(this, SOFT_DELETE_COLUMN, undefined);
+    this.snapshotAttributes();
+    return true;
+  }
+
+  /** Whether this record is soft-deleted. Always false on a model without a `deletedAt` column. */
+  get isDeleted(): boolean {
+    const ctor = this.constructor as typeof Model;
+    return ctor.columns.has(SOFT_DELETE_COLUMN) && getAttr(this, SOFT_DELETE_COLUMN) != null;
   }
 
   /** Assigns `attrs` then saves. Returns false — without writing — under the same conditions as save(). */
