@@ -161,6 +161,44 @@ describe('destroy() callbacks', () => {
   });
 });
 
+describe('deleteAll() vs destroy()', () => {
+  it('deleteAll() runs no callbacks at all, even ones that would block an individual destroy()', async () => {
+    await Post.create({ title: 'Blocked', blockDestroy: 1 });
+    await Post.create({ title: 'Unblocked' });
+    log = [];
+
+    const deleted = await Post.all().deleteAll();
+
+    expect(deleted).toBe(2);
+    expect(log).toEqual([]);
+    expect(await Post.all().count()).toBe(0);
+  });
+});
+
+describe('destroyAll()', () => {
+  it('runs beforeDestroy/afterDestroy per record, same as calling destroy() on each', async () => {
+    await Post.create({ title: 'First' });
+    await Post.create({ title: 'Second' });
+    log = [];
+
+    const destroyed = await Post.all().destroyAll();
+
+    expect(destroyed).toBe(2);
+    expect(log).toEqual(['beforeDestroy', 'afterDestroy', 'beforeDestroy', 'afterDestroy']);
+  });
+
+  it('a beforeDestroy callback blocking one record still lets the rest be destroyed', async () => {
+    await Post.create({ title: 'Blocked', blockDestroy: 1 });
+    await Post.create({ title: 'Unblocked' });
+    log = [];
+
+    const destroyed = await Post.all().destroyAll();
+
+    expect(destroyed).toBe(1);
+    expect(await Post.all().pluck('title')).toEqual(['Blocked']);
+  });
+});
+
 describe('saveOrFail() error type by failure cause', () => {
   class BlockedPost extends Model {
     static tableName = 'posts';

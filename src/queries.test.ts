@@ -93,6 +93,104 @@ describe('exists', () => {
   });
 });
 
+describe('updateAll', () => {
+  it('updates every matching row and returns the count updated', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 1 });
+    await User.create({ name: 'Carol', active: 0 });
+
+    const updated = await User.where({ active: 1 } as any).updateAll({ active: 0 });
+
+    expect(updated).toBe(2);
+    expect(await User.all().order('name', 'asc').pluck('active')).toEqual([0, 0, 0]);
+  });
+
+  it('updates nothing and returns 0 when no rows match', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+
+    const updated = await User.where({ name: 'Nobody' } as any).updateAll({ active: 0 });
+
+    expect(updated).toBe(0);
+  });
+
+  it('issues a single bulk statement rather than one query per row', async () => {
+    await User.create({ name: 'Alice' });
+    await User.create({ name: 'Bob' });
+    await User.create({ name: 'Carol' });
+    queryCount = 0;
+
+    await User.all().updateAll({ active: 0 });
+
+    expect(queryCount).toBe(1);
+  });
+});
+
+describe('deleteAll', () => {
+  it('deletes every matching row and returns the count deleted', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 0 });
+    await User.create({ name: 'Carol', active: 1 });
+
+    const deleted = await User.where({ active: 1 } as any).deleteAll();
+
+    expect(deleted).toBe(2);
+    expect(await User.all().pluck('name')).toEqual(['Bob']);
+  });
+
+  it('deletes nothing and returns 0 when no rows match', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+
+    const deleted = await User.where({ name: 'Nobody' } as any).deleteAll();
+
+    expect(deleted).toBe(0);
+    expect(await User.all().count()).toBe(1);
+  });
+
+  it('issues a single bulk statement rather than one query per row', async () => {
+    await User.create({ name: 'Alice' });
+    await User.create({ name: 'Bob' });
+    await User.create({ name: 'Carol' });
+    queryCount = 0;
+
+    await User.all().deleteAll();
+
+    expect(queryCount).toBe(1);
+  });
+});
+
+describe('destroyAll', () => {
+  it('destroys every matching row and returns the count destroyed', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+    await User.create({ name: 'Bob', active: 0 });
+    await User.create({ name: 'Carol', active: 1 });
+
+    const destroyed = await User.where({ active: 1 } as any).destroyAll();
+
+    expect(destroyed).toBe(2);
+    expect(await User.all().pluck('name')).toEqual(['Bob']);
+  });
+
+  it('destroys nothing and returns 0 when no rows match', async () => {
+    await User.create({ name: 'Alice', active: 1 });
+
+    const destroyed = await User.where({ name: 'Nobody' } as any).destroyAll();
+
+    expect(destroyed).toBe(0);
+    expect(await User.all().count()).toBe(1);
+  });
+
+  it('issues one query per record plus the initial SELECT, unlike deleteAll()', async () => {
+    await User.create({ name: 'Alice' });
+    await User.create({ name: 'Bob' });
+    await User.create({ name: 'Carol' });
+    queryCount = 0;
+
+    await User.all().destroyAll();
+
+    expect(queryCount).toBe(4); // 1 SELECT + 3 DELETEs
+  });
+});
+
 describe('findEach / findInBatches', () => {
   beforeEach(async () => {
     for (let i = 1; i <= 7; i++) {

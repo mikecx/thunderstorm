@@ -28,3 +28,5 @@ export { HasOneAttached, HasManyAttached, attachmentColumns, createAttachmentTab
 export type { BlobStorage, AttachmentInput } from './attachments';
 export { encryptedCaster } from './encryption';
 export type { EncryptedCasterOptions } from './encryption';
+export { Dependent } from './dependent';
+export type { DependentAction } from './dependent';
