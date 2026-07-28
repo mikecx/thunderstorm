@@ -148,7 +148,7 @@ describe('insertAll', () => {
       { name: 'Alice', active: 1 },
       { name: 'Bob', active: 0 },
       { name: 'Carol', active: 1 },
-    ] as any);
+    ]);
 
     expect(inserted).toBe(3);
     expect(await User.all().order('name', 'asc').pluck('name')).toEqual(['Alice', 'Bob', 'Carol']);
@@ -170,17 +170,17 @@ describe('insertAll', () => {
       { name: 'Alice', active: 1 },
       { name: 'Bob', active: 1 },
       { name: 'Carol', active: 1 },
-    ] as any);
+    ]);
 
     expect(queryCount).toBe(1);
   });
 
   it('does not run beforeCreate callbacks, unlike create()', async () => {
-    const created = await StampedThing.create({ name: 'Via create' } as any);
+    const created = await StampedThing.create({ name: 'Via create' });
     expect(created.createdAt).toBeInstanceOf(Date);
 
-    await StampedThing.insertAll([{ name: 'Via insertAll' } as any]);
-    const bulk = await StampedThing.where({ name: 'Via insertAll' } as any).first();
+    await StampedThing.insertAll([{ name: 'Via insertAll' }]);
+    const bulk = await StampedThing.where({ name: 'Via insertAll' }).first();
     expect(bulk!.createdAt).toBeNull();
   });
 });
