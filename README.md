@@ -282,6 +282,19 @@ await Session.insertAll([
 
 Like `deleteAll()`, this skips instantiation entirely — no defaults, no validations, and no `beforeSave`/`beforeCreate`/`afterCreate` callbacks run, so anything a model relies on one of those for (`Timestamped`'s `createdAt`/`updatedAt`, `SecureToken`'s token generation, `SecurePassword`'s hashing) must be supplied directly in each row. This makes it a good fit for callback-light models — bulk-seeding, imports — not a drop-in replacement for looping `create()`. Each row's values still pass through the same column casting as `create()`/`where()`, so a caster-backed column (`json`, `encryptedCaster`) is written correctly. Returns the number of rows given, not a driver-reported count — unlike update/delete, a bulk insert either fully succeeds or throws.
 
+### Row locking
+
+`.lock()` is pessimistic locking — `SELECT ... FOR UPDATE` (default) or `.lock('share')` for `FOR SHARE` — a thin wrapper over Knex's own `.forUpdate()`/`.forShare()`. Only meaningful inside `transaction()`: Postgres/MySQL hold the lock until the surrounding transaction commits or rolls back, so use it to serialize concurrent access to a row while you read-then-write it:
+
+```ts
+await transaction(async () => {
+  const account = await Account.where({ id }).lock().first(); // other transactions block here until this one commits
+  await account!.update({ balance: account!.balance - amount });
+});
+```
+
+Outside a transaction there's nothing to hold the lock across, so it's released the instant the `SELECT` completes — pointless, though harmless, to call it there. SQLite has no row-level locking at all and silently ignores it (it already locks at the database/table level for writes).
+
 ## Validations
 
 `@Validates({...})` stacks — apply it more than once on the same field to accumulate rules.
