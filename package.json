@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.0",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "knex": "^3.1.0",
