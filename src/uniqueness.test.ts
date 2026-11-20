@@ -106,6 +106,33 @@ describe('uniqueness validation', () => {
     expect(dup.errors.on('handle')).toContain('is already taken in this organization');
   });
 
+  it('scoped uniqueness accepts an array of scope attributes, and only conflicts when all of them match', async () => {
+    class Member extends Model {
+      static tableName = 'users';
+
+      @PrimaryKey()
+      id!: number;
+
+      @Column()
+      email!: string;
+
+      @Column()
+      organizationId!: number;
+
+      @Column()
+      @Validates({ uniqueness: { scope: ['organizationId', 'email'] } })
+      handle!: string;
+    }
+
+    await Member.create({ handle: 'ace', organizationId: 1, email: 'a@example.com' });
+    const otherEmail = await Member.create({ handle: 'ace', organizationId: 1, email: 'b@example.com' });
+    expect(otherEmail.isPersisted).toBe(true);
+
+    const dup = new Member({ handle: 'ace', organizationId: 1, email: 'a@example.com' });
+    expect(await dup.save()).toBe(false);
+    expect(dup.errors.on('handle')).toEqual(['has already been taken']);
+  });
+
   it('saveOrFail() throws RecordInvalid (not RecordNotSaved) on a uniqueness violation', async () => {
     await User.create({ email: 'alice@example.com' });
     const dup = new User({ email: 'alice@example.com' });
