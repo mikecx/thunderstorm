@@ -344,7 +344,7 @@ Outside a transaction there's nothing to hold the lock across, so it's released 
 role!: string;
 ```
 
-Supported keys: `presence`, `length: { min, max }`, `format: { with: RegExp }`, `inclusion: { in: [...] }`, `validator: (value, instance) => string | null | undefined`, `allowBlank` (skip length/format/inclusion when the value is `null`/`undefined`/`''`), and `message` to override the default text.
+Supported keys: `presence`, `length: { min, max }`, `format: { with: RegExp }`, `inclusion: { in: [...] }`, `validator: (value, instance) => string | null | undefined`, `allowBlank` (skip length/format/inclusion and `validator` when the value is `null`/`undefined`/`''`), and `message` to override the default text.
 
 `uniqueness` is different from every other key above: it needs a database query, so it's the one `Model`-only validation (`AttributeModel` has no table to check against) and it doesn't run from the synchronous `isValid()` — only `save()`/`saveOrFail()` check it, right after the in-memory validations pass:
 

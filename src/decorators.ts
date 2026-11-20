@@ -96,7 +96,7 @@ export interface ValidationRule {
   inclusion?: { in: readonly any[] };
   /** Custom check; return an error message string to fail, or null/undefined to pass. */
   validator?: (value: any, instance: any) => string | null | undefined | void;
-  /** Skip length/format/inclusion checks when the value is null/undefined/''. */
+  /** Skip length/format/inclusion checks and `validator` when the value is null/undefined/''. */
   allowBlank?: boolean;
   /** Overrides the default message for this rule. */
   message?: string;
