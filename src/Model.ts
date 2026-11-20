@@ -668,15 +668,14 @@ export class Model extends AttributeModel {
    * `typeField` value first, then runs one batched query per distinct type
    * actually present. Still bounded (at most `types.size` queries, never one
    * per record), just not always exactly one query the way the
-   * single-target preloads are.
+   * single-target preloads are. Each bucket is then an ordinary
+   * `preloadBelongsTo` against that type's class.
    */
   static async preloadBelongsToPolymorphic<T extends typeof Model>(
     this: T,
     records: InstanceType<T>[],
     options: { idField: string; typeField: string; types: Record<string, typeof Model>; as: string }
   ): Promise<void> {
-    if (records.length === 0) return;
-
     const recordsByType = new Map<string, InstanceType<T>[]>();
     for (const record of records) {
       const type = getAttr(record, options.typeField);
@@ -690,16 +689,7 @@ export class Model extends AttributeModel {
       const target = options.types[type];
       if (!target) continue; // unrecognized type string — leave `as` unset for these records
 
-      const ids = [...new Set(recordsOfType.map((r) => getAttr(r, options.idField)).filter((v) => v != null))];
-      const rows = ids.length > 0 ? await target.scopedQuery().whereIn(target.primaryKey, ids) : [];
-
-      const byId = new Map<any, InstanceType<typeof target>>();
-      for (const row of rows) {
-        byId.set(row[target.primaryKey], target.fromRow(row));
-      }
-      for (const record of recordsOfType) {
-        setAttr(record, options.as, byId.get(getAttr(record, options.idField)));
-      }
+      await this.preloadBelongsTo(recordsOfType, target, { foreignKey: options.idField, as: options.as });
     }
   }
 

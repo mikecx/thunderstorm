@@ -630,6 +630,31 @@ describe('polymorphic associations', () => {
     expect((comment as any)._commentable).toBeUndefined();
   });
 
+  it('preloadBelongsToPolymorphic only queries for records with both a known type and an id', async () => {
+    const options = {
+      idField: 'commentableId',
+      typeField: 'commentableType',
+      types: COMMENTABLE_TYPES,
+      as: '_commentable',
+    };
+    const noType = await Comment.create({ body: 'no type', commentableId: 1 });
+    const noId = await Comment.create({ body: 'no id', commentableType: 'post' });
+    const dangling = await Comment.create({ body: 'dangling', commentableId: 999, commentableType: 'photo' });
+
+    queryCount = 0;
+    await Comment.preloadBelongsToPolymorphic([], options);
+    expect(queryCount).toBe(0);
+
+    await Comment.preloadBelongsToPolymorphic([noType, noId], options);
+    expect(queryCount).toBe(0); // the 'post' bucket's only id is null, so nothing to look up
+    expect('_commentable' in noType).toBe(false); // no type at all: left unset, not assigned
+    expect((noId as any)._commentable).toBeUndefined();
+
+    await Comment.preloadBelongsToPolymorphic([dangling], options);
+    expect(queryCount).toBe(1);
+    expect((dangling as any)._commentable).toBeUndefined();
+  });
+
   it('preloadHasManyPolymorphic short-circuits without querying when given no records', async () => {
     queryCount = 0;
     await Post.preloadHasManyPolymorphic([], Comment, {
