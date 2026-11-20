@@ -189,19 +189,9 @@ class Account extends Model {
   balance!: number;
 }
 
-async function main() {
-  // Same migrations that `npm run migrate:latest` applies to the real dev
-  // database (via knexfile.ts) — run here against a fresh in-memory DB so
-  // the demo is self-contained and always reflects the real schema.
-  const knex = knexFactory({
-    client: 'sqlite3',
-    connection: { filename: ':memory:' },
-    useNullAsDefault: true,
-    migrations: { directory: path.join(__dirname, '../../migrations') },
-  });
-  connect(knex);
-  await knex.migrate.latest();
+// --- crud + dirty tracking ---------------------------------------------------
 
+async function demoCrud() {
   const alice = await User.create({ name: 'Alice', email: 'alice@example.com' });
   console.log('created:', alice.id, alice.name, alice.isPersisted);
 
@@ -235,7 +225,11 @@ async function main() {
 
   await found!.destroy();
   console.log('remaining after destroy:', (await User.all()).length);
+}
 
+// --- validations -------------------------------------------------------------
+
+async function demoValidations() {
   const invalid = new User({ name: 'A', email: 'not-an-email' });
   const saved = await invalid.save();
   console.log('invalid save returned:', saved, 'isPersisted:', invalid.isPersisted);
@@ -248,7 +242,11 @@ async function main() {
   } catch (err: any) {
     console.log('saveOrFail threw:', err.name, '-', err.message);
   }
+}
 
+// --- callbacks ---------------------------------------------------------------
+
+async function demoCallbacks() {
   const post = await Post.create({ title: 'Hello Callbacks', pinned: 1 });
   console.log('post slug (set by beforeCreate):', post.slug);
 
@@ -259,7 +257,11 @@ async function main() {
   await post.save();
   const destroyedAfterUnpin = await post.destroy();
   console.log('destroy after unpin returned:', destroyedAfterUnpin, 'isPersisted:', post.isPersisted);
+}
 
+// --- associations + preloading -----------------------------------------------
+
+async function demoAssociations(knex: knexFactory.Knex) {
   const carol = await User.create({ name: 'Carol', email: 'carol@example.com' });
   const dave = await User.create({ name: 'Dave', email: 'dave@example.com' });
   await Post.create({ title: 'Carol Post 1', userId: carol.id });
@@ -292,9 +294,11 @@ async function main() {
     'preloaded titles by user:',
     Object.fromEntries(authors.map((u) => [u.name, (u as any)._posts.map((p: Post) => p.title)]))
   );
+}
 
-  // --- casting + custom accessor -----------------------------------------
+// --- casting + custom accessor -------------------------------------------------
 
+async function demoCasting() {
   const order = await Order.create({
     code: '  ab-123  ',
     paid: true,
@@ -312,15 +316,19 @@ async function main() {
     '| metadata:',
     reloadedOrder!.metadata
   );
+}
 
-  // --- delegate ------------------------------------------------------------
+// --- delegate ------------------------------------------------------------------
 
+async function demoDelegate() {
   const writer = await Writer.create({ name: 'Grace' });
   const article = await Article.create({ writerId: writer.id });
   console.log('article.writerName() (delegate):', await article.writerName());
+}
 
-  // --- enum + scopes ---------------------------------------------------------
+// --- enum + scopes ---------------------------------------------------------------
 
+async function demoEnumAndScopes() {
   await Ticket.create({ subject: 'Bug A', status: 0 });
   await Ticket.create({ subject: 'Bug B', status: 1 });
   const ticket = await Ticket.create({ subject: 'Bug C', status: 0 });
@@ -330,9 +338,11 @@ async function main() {
     'Ticket.open() scope:',
     openTickets.map((t) => t.subject)
   );
+}
 
-  // --- timestamps ------------------------------------------------------------
+// --- timestamps ------------------------------------------------------------------
 
+async function demoTimestamps() {
   const tsPost = await TimestampedPost.create({ title: 'Hello Timestamps' });
   console.log('createdAt set by Timestamped mixin:', tsPost.createdAt instanceof Date, tsPost.createdAt);
   const createdAt = tsPost.createdAt;
@@ -344,31 +354,57 @@ async function main() {
     '| updatedAt bumped:',
     tsPost.updatedAt.getTime() >= createdAt.getTime()
   );
+}
 
-  // --- transactions ----------------------------------------------------------
+// --- transactions ----------------------------------------------------------------
 
-  const alice2 = await Account.create({ name: 'Alice', balance: 100 });
-  const bob2 = await Account.create({ name: 'Bob', balance: 50 });
+async function demoTransactions() {
+  const alice = await Account.create({ name: 'Alice', balance: 100 });
+  const bob = await Account.create({ name: 'Bob', balance: 50 });
 
   await transaction(async () => {
-    alice2.balance -= 30;
-    await alice2.save();
-    bob2.balance += 30;
-    await bob2.save();
+    alice.balance -= 30;
+    await alice.save();
+    bob.balance += 30;
+    await bob.save();
   });
-  console.log('after committed transfer — Alice:', alice2.balance, '| Bob:', bob2.balance);
+  console.log('after committed transfer — Alice:', alice.balance, '| Bob:', bob.balance);
 
   try {
     await transaction(async () => {
-      alice2.balance -= 1000; // would go negative
-      await alice2.save();
+      alice.balance -= 1000; // would go negative
+      await alice.save();
       throw new Error('insufficient funds, abort transfer');
     });
   } catch (err: any) {
     console.log('transaction rolled back after:', err.message);
   }
-  const finalAlice = await Account.find(alice2.id);
+  const finalAlice = await Account.find(alice.id);
   console.log('Alice balance unchanged after rollback:', finalAlice!.balance);
+}
+
+async function main() {
+  // Same migrations that `npm run migrate:latest` applies to the real dev
+  // database (via knexfile.ts) — run here against a fresh in-memory DB so
+  // the demo is self-contained and always reflects the real schema.
+  const knex = knexFactory({
+    client: 'sqlite3',
+    connection: { filename: ':memory:' },
+    useNullAsDefault: true,
+    migrations: { directory: path.join(__dirname, '../../migrations') },
+  });
+  connect(knex);
+  await knex.migrate.latest();
+
+  await demoCrud();
+  await demoValidations();
+  await demoCallbacks();
+  await demoAssociations(knex);
+  await demoCasting();
+  await demoDelegate();
+  await demoEnumAndScopes();
+  await demoTimestamps();
+  await demoTransactions();
 
   await knex.destroy();
 }
