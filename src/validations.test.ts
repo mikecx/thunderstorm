@@ -99,6 +99,35 @@ describe('isValid / errors', () => {
     user.isValid();
     expect(user.errors.isEmpty).toBe(true);
   });
+
+  it('still applies length to a blank value (as length 0) when neither presence nor allowBlank is set', () => {
+    class Profile extends Model {
+      static tableName = 'users';
+
+      @Column()
+      @Validates({ length: { min: 2 } })
+      name?: string;
+    }
+
+    const blank = new Profile({});
+    expect(blank.isValid()).toBe(false);
+    expect(blank.errors.on('name')).toEqual(['is too short (minimum is 2 characters)']);
+  });
+
+  it('uses a custom message for length failures in place of both default messages', () => {
+    class Profile extends Model {
+      static tableName = 'users';
+
+      @Column()
+      @Validates({ length: { min: 2, max: 3 }, message: 'must be 2-3 characters' })
+      name?: string;
+    }
+
+    expect(new Profile({ name: 'A' }).isValid()).toBe(false);
+    const tooLong = new Profile({ name: 'ABCD' });
+    expect(tooLong.isValid()).toBe(false);
+    expect(tooLong.errors.on('name')).toEqual(['must be 2-3 characters']);
+  });
 });
 
 describe('custom validator and validate() hook', () => {

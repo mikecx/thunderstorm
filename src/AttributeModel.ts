@@ -117,23 +117,33 @@ export class AttributeModel {
     return value === undefined || value === null || value === '';
   }
 
+  /** Default messages for whichever `length` bounds `value` violates. A blank value counts as length 0. */
+  private static lengthErrors(value: any, length: NonNullable<ValidationRule['length']>): string[] {
+    const len = value == null ? 0 : String(value).length;
+    const errors: string[] = [];
+    if (length.min !== undefined && len < length.min) {
+      errors.push(`is too short (minimum is ${length.min} characters)`);
+    }
+    if (length.max !== undefined && len > length.max) {
+      errors.push(`is too long (maximum is ${length.max} characters)`);
+    }
+    return errors;
+  }
+
   private applyRule(attribute: string, value: any, rule: ValidationRule): void {
-    if (rule.presence && AttributeModel.isBlank(value)) {
+    const blank = AttributeModel.isBlank(value);
+    if (rule.presence && blank) {
       this.errors.add(attribute, rule.message ?? "can't be blank");
     }
 
-    if (AttributeModel.isBlank(value) && (rule.allowBlank || rule.presence)) {
+    if (blank && (rule.allowBlank || rule.presence)) {
       // Presence already reported above; skip shape checks on an absent value.
       return;
     }
 
     if (rule.length) {
-      const len = value == null ? 0 : String(value).length;
-      if (rule.length.min !== undefined && len < rule.length.min) {
-        this.errors.add(attribute, rule.message ?? `is too short (minimum is ${rule.length.min} characters)`);
-      }
-      if (rule.length.max !== undefined && len > rule.length.max) {
-        this.errors.add(attribute, rule.message ?? `is too long (maximum is ${rule.length.max} characters)`);
+      for (const message of AttributeModel.lengthErrors(value, rule.length)) {
+        this.errors.add(attribute, rule.message ?? message);
       }
     }
 

@@ -1,7 +1,15 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Knex } from 'knex';
-import { AttributeModel, AttributesOf, getAttr, setAttr } from './AttributeModel';
-import { CALLBACKS, CallbackType, DEFAULT_SCOPES, ScopeFn, STI_TYPE_COLUMN, stiTargetFor } from './decorators';
+import { AttributeModel, AttributesOf, Changes, getAttr, setAttr } from './AttributeModel';
+import {
+  CALLBACKS,
+  CallbackType,
+  DEFAULT_SCOPES,
+  ScopeFn,
+  STI_TYPE_COLUMN,
+  stiTargetFor,
+  ValidationRule,
+} from './decorators';
 import { resolveCaster } from './casters';
 import { RecordInvalid, RecordNotSaved, StaleObjectError } from './errors';
 
@@ -738,7 +746,6 @@ export class Model extends AttributeModel {
    */
   private async checkUniqueness(): Promise<void> {
     const ctor = this.constructor as typeof Model;
-    const pk = ctor.primaryKey;
 
     for (const [attribute, rules] of ctor.validations) {
       for (const rule of rules) {
@@ -747,22 +754,36 @@ export class Model extends AttributeModel {
         const value = getAttr(this, attribute);
         if (value === undefined || value === null || value === '') continue;
 
-        let qb = ctor.scopedQuery().where(attribute, ctor.castForWrite(attribute, value));
-        if (typeof rule.uniqueness === 'object' && rule.uniqueness.scope) {
-          const scopes = Array.isArray(rule.uniqueness.scope) ? rule.uniqueness.scope : [rule.uniqueness.scope];
-          for (const scopeAttr of scopes) {
-            qb = qb.where(scopeAttr, ctor.castForWrite(scopeAttr, getAttr(this, scopeAttr)));
-          }
-        }
-        if (this[PERSISTED]) {
-          qb = qb.whereNot(pk, getAttr(this, pk));
-        }
-
-        if (await qb.first()) {
+        if (await this.uniquenessConflictQuery(attribute, value, rule.uniqueness).first()) {
           this.errors.add(attribute, rule.message ?? 'has already been taken');
         }
       }
     }
+  }
+
+  /**
+   * Query for another row (excluding this one, once persisted) holding the
+   * same `value` for `attribute` — and, for a scoped rule, the same value of
+   * every scope attribute too.
+   */
+  private uniquenessConflictQuery(
+    attribute: string,
+    value: any,
+    uniqueness: NonNullable<ValidationRule['uniqueness']>
+  ): Knex.QueryBuilder {
+    const ctor = this.constructor as typeof Model;
+    const pk = ctor.primaryKey;
+
+    let qb = ctor.scopedQuery().where(attribute, ctor.castForWrite(attribute, value));
+    const scope = typeof uniqueness === 'object' ? uniqueness.scope : undefined;
+    const scopes = !scope ? [] : Array.isArray(scope) ? scope : [scope];
+    for (const scopeAttr of scopes) {
+      qb = qb.where(scopeAttr, ctor.castForWrite(scopeAttr, getAttr(this, scopeAttr)));
+    }
+    if (this[PERSISTED]) {
+      qb = qb.whereNot(pk, getAttr(this, pk));
+    }
+    return qb;
   }
 
   /**
@@ -801,45 +822,16 @@ export class Model extends AttributeModel {
     await this.checkUniqueness();
     if (!this.errors.isEmpty) return false;
 
-    const ctor = this.constructor as typeof Model;
     const isCreate = !this[PERSISTED];
 
     if (!(await this.runCallbacks('beforeSave'))) return false;
     if (!(await this.runCallbacks(isCreate ? 'beforeCreate' : 'beforeUpdate'))) return false;
 
-    const pk = ctor.primaryKey;
     const pendingChanges = this.changes;
-
     if (isCreate) {
-      const attrs = this.columnAttributes();
-      const [inserted] = await ctor.query().insert(attrs).returning(pk);
-      setAttr(this, pk, typeof inserted === 'object' ? inserted[pk] : inserted);
-      this[PERSISTED] = true;
+      await this.insertRow();
     } else {
-      const updateAttrs: Record<string, any> = {};
-      for (const [key, [, newValue]] of Object.entries(pendingChanges)) {
-        const columnOptions = ctor.columns.get(key);
-        if (key === pk || key === LOCK_COLUMN || columnOptions?.virtual || columnOptions?.readonly) continue;
-        updateAttrs[key] = ctor.castForWrite(key, newValue);
-      }
-      if (Object.keys(updateAttrs).length > 0) {
-        let qb = ctor.query().where(pk, getAttr(this, pk));
-        const isLockable = ctor.columns.has(LOCK_COLUMN);
-        let nextLockVersion: number | undefined;
-
-        if (isLockable) {
-          const currentLockVersion = getAttr(this, LOCK_COLUMN) as number;
-          nextLockVersion = currentLockVersion + 1;
-          updateAttrs[LOCK_COLUMN] = ctor.castForWrite(LOCK_COLUMN, nextLockVersion);
-          qb = qb.where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, currentLockVersion));
-        }
-
-        const affected = await qb.update(updateAttrs);
-        if (isLockable) {
-          if (affected === 0) throw new StaleObjectError(this);
-          setAttr(this, LOCK_COLUMN, nextLockVersion);
-        }
-      }
+      await this.updateRow(pendingChanges);
     }
 
     this.setPreviousChanges(pendingChanges);
@@ -849,6 +841,56 @@ export class Model extends AttributeModel {
     await this.runCallbacks('afterSave');
 
     return true;
+  }
+
+  /** save()'s INSERT path: writes every set column and adopts the generated primary key. */
+  private async insertRow(): Promise<void> {
+    const ctor = this.constructor as typeof Model;
+    const pk = ctor.primaryKey;
+    const [inserted] = await ctor.query().insert(this.columnAttributes()).returning(pk);
+    setAttr(this, pk, typeof inserted === 'object' ? inserted[pk] : inserted);
+    this[PERSISTED] = true;
+  }
+
+  /** The subset of `changes` an UPDATE may write, cast for the DB: never the primary key, lock, virtual or readonly columns. */
+  private writableChanges(changes: Changes): Record<string, any> {
+    const ctor = this.constructor as typeof Model;
+    const attrs: Record<string, any> = {};
+    for (const [key, [, newValue]] of Object.entries(changes)) {
+      const columnOptions = ctor.columns.get(key);
+      if (key === ctor.primaryKey || key === LOCK_COLUMN || columnOptions?.virtual || columnOptions?.readonly) continue;
+      attrs[key] = ctor.castForWrite(key, newValue);
+    }
+    return attrs;
+  }
+
+  /**
+   * save()'s UPDATE path: a partial write of just the writable changed
+   * columns, issuing no query at all when there are none. On a `Lockable`
+   * model, also bumps `lockVersion` and only matches the row at the version
+   * this instance last saw, throwing StaleObjectError if it's moved on.
+   */
+  private async updateRow(pendingChanges: Changes): Promise<void> {
+    const updateAttrs = this.writableChanges(pendingChanges);
+    if (Object.keys(updateAttrs).length === 0) return;
+
+    const ctor = this.constructor as typeof Model;
+    const pk = ctor.primaryKey;
+    const qb = ctor.query().where(pk, getAttr(this, pk));
+
+    if (!ctor.columns.has(LOCK_COLUMN)) {
+      await qb.update(updateAttrs);
+      return;
+    }
+
+    const currentLockVersion = getAttr(this, LOCK_COLUMN) as number;
+    const nextLockVersion = currentLockVersion + 1;
+    updateAttrs[LOCK_COLUMN] = ctor.castForWrite(LOCK_COLUMN, nextLockVersion);
+    const affected = await qb
+      .where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, currentLockVersion))
+      .update(updateAttrs);
+    if (affected === 0) throw new StaleObjectError(this);
+    setAttr(this, LOCK_COLUMN, nextLockVersion);
   }
 
   /**
@@ -881,23 +923,24 @@ export class Model extends AttributeModel {
     if (isLockable) qb = qb.where(LOCK_COLUMN, ctor.castForWrite(LOCK_COLUMN, getAttr(this, LOCK_COLUMN)));
 
     const isSoftDeletable = ctor.columns.has(SOFT_DELETE_COLUMN);
-    let affected: number;
-    if (isSoftDeletable) {
-      const deletedAt = new Date();
-      affected = await qb.update({ [SOFT_DELETE_COLUMN]: ctor.castForWrite(SOFT_DELETE_COLUMN, deletedAt) });
-      if (isLockable && affected === 0) throw new StaleObjectError(this);
-      if (affected > 0) {
-        setAttr(this, SOFT_DELETE_COLUMN, deletedAt);
-        this.snapshotAttributes();
-      }
-    } else {
-      affected = await qb.delete();
-      if (isLockable && affected === 0) throw new StaleObjectError(this);
-      this[PERSISTED] = false;
-    }
+    const affected = isSoftDeletable ? await this.softDeleteRow(qb) : await qb.delete();
+    if (isLockable && affected === 0) throw new StaleObjectError(this);
+    if (!isSoftDeletable) this[PERSISTED] = false;
 
     await this.runCallbacks('afterDestroy');
     return true;
+  }
+
+  /** destroy()'s SoftDelete path: stamps `deletedAt` via `qb`, mirroring it onto this instance if a row matched. */
+  private async softDeleteRow(qb: Knex.QueryBuilder): Promise<number> {
+    const ctor = this.constructor as typeof Model;
+    const deletedAt = new Date();
+    const affected = await qb.update({ [SOFT_DELETE_COLUMN]: ctor.castForWrite(SOFT_DELETE_COLUMN, deletedAt) });
+    if (affected > 0) {
+      setAttr(this, SOFT_DELETE_COLUMN, deletedAt);
+      this.snapshotAttributes();
+    }
+    return affected;
   }
 
   /**
