@@ -130,35 +130,28 @@ export class AttributeModel {
     return errors;
   }
 
-  private applyRule(attribute: string, value: any, rule: ValidationRule): void {
-    const blank = AttributeModel.isBlank(value);
-    if (rule.presence && blank) {
-      this.errors.add(attribute, rule.message ?? "can't be blank");
-    }
+  /** Default messages for every built-in shape check (length, format, inclusion) that `value` fails, in that order. */
+  private static shapeErrors(value: any, rule: ValidationRule): string[] {
+    const errors = rule.length ? AttributeModel.lengthErrors(value, rule.length) : [];
+    if (rule.format && !rule.format.with.test(String(value))) errors.push('is invalid');
+    if (rule.inclusion && !rule.inclusion.in.includes(value)) errors.push('is not included in the list');
+    return errors;
+  }
 
-    if (blank && (rule.allowBlank || rule.presence)) {
-      // Presence already reported above; skip shape checks on an absent value.
+  private applyRule(attribute: string, value: any, rule: ValidationRule): void {
+    if (AttributeModel.isBlank(value) && (rule.presence || rule.allowBlank)) {
+      // An absent value only gets the presence check; shape checks and the validator are skipped.
+      if (rule.presence) this.errors.add(attribute, rule.message ?? "can't be blank");
       return;
     }
 
-    if (rule.length) {
-      for (const message of AttributeModel.lengthErrors(value, rule.length)) {
-        this.errors.add(attribute, rule.message ?? message);
-      }
+    // rule.message overrides every built-in default, but never a validator's own message.
+    for (const message of AttributeModel.shapeErrors(value, rule)) {
+      this.errors.add(attribute, rule.message ?? message);
     }
 
-    if (rule.format && !rule.format.with.test(String(value))) {
-      this.errors.add(attribute, rule.message ?? 'is invalid');
-    }
-
-    if (rule.inclusion && !rule.inclusion.in.includes(value)) {
-      this.errors.add(attribute, rule.message ?? 'is not included in the list');
-    }
-
-    if (rule.validator) {
-      const message = rule.validator(value, this);
-      if (message) this.errors.add(attribute, message);
-    }
+    const validatorMessage = rule.validator?.(value, this);
+    if (validatorMessage) this.errors.add(attribute, validatorMessage);
   }
 
   private runValidations(): void {

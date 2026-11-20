@@ -147,6 +147,42 @@ describe('custom validator and validate() hook', () => {
     expect(account.errors.on('balance')).toContain('must not be negative');
   });
 
+  it("uses the validator's own message even when the rule sets a custom message", () => {
+    class Account extends Model {
+      static tableName = 'users';
+
+      @Column()
+      @Validates({ validator: () => 'from the validator', message: 'from the rule' })
+      balance!: number;
+    }
+
+    const account = new Account({ balance: 1 });
+    expect(account.isValid()).toBe(false);
+    expect(account.errors.on('balance')).toEqual(['from the validator']);
+  });
+
+  it('skips the validator on a blank value when the rule has presence or allowBlank, and runs it otherwise', () => {
+    const calls: string[] = [];
+    class Account extends Model {
+      static tableName = 'users';
+
+      @Column()
+      @Validates({ presence: true, validator: () => void calls.push('presence') })
+      @Validates({ allowBlank: true, validator: () => void calls.push('allowBlank') })
+      @Validates({ validator: () => void calls.push('neither') })
+      name?: string;
+    }
+
+    const blank = new Account({ name: '' });
+    expect(blank.isValid()).toBe(false);
+    expect(blank.errors.on('name')).toEqual(["can't be blank"]);
+    expect(calls).toEqual(['neither']);
+
+    calls.length = 0;
+    expect(new Account({ name: 'x' }).isValid()).toBe(true);
+    expect(calls.sort()).toEqual(['allowBlank', 'neither', 'presence']);
+  });
+
   it('supports cross-field checks via the validate() hook', () => {
     class SignupForm extends Model {
       static tableName = 'users';
